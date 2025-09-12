@@ -63,6 +63,18 @@ window.addEventListener(
     if (isTypingContext()) return;
     if (e.defaultPrevented) return;
 
+    // --- Resize keybinds: Cmd+Shift + H/J/K/L ---
+    if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey) {
+      const k = e.key.toUpperCase();
+      if (k === "H" || k === "J" || k === "K" || k === "L") {
+        e.preventDefault();
+        const dir =
+          k === "H" ? "left" : k === "L" ? "right" : k === "K" ? "up" : "down";
+        ipcRenderer.send("pane:kb-resize", { paneId, dir });
+        return;
+      }
+    }
+
     // --- Split keybinds: Cmd + H/J/K/L ---
     if (!e.shiftKey && e.metaKey && !e.ctrlKey && !e.altKey) {
       const k = e.key.toUpperCase();

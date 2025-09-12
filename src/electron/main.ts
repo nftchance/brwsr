@@ -129,6 +129,63 @@ function replaceNode(node: Node, targetId: number): Node | null {
   return { ...node, a: a2!, b: b2! };
 }
 
+function containsNode(node: Node, id: number): boolean {
+  if (node.kind === "leaf") return node.id === id;
+  return containsNode(node.a, id) || containsNode(node.b, id);
+}
+
+function findSplitForResize(
+  node: Node,
+  targetId: number,
+  axis: "vertical" | "horizontal"
+): { split: Split; isInA: boolean } | null {
+  if (node.kind === "leaf") return null;
+  const inA = containsNode(node.a, targetId);
+  const inB = !inA && containsNode(node.b, targetId);
+  if (!inA && !inB) return null;
+
+  // Prefer the deepest split along the path that matches the axis
+  const child = inA ? node.a : node.b;
+  const deeper = findSplitForResize(child, targetId, axis);
+  if (deeper) return deeper;
+
+  if (node.dir === axis) {
+    return { split: node, isInA: inA };
+  }
+  return null;
+}
+
+function nudgeSplitSize(
+  targetLeafId: number,
+  direction: "left" | "right" | "up" | "down",
+  step = 0.03
+) {
+  if (!root) return;
+  const axis =
+    direction === "left" || direction === "right" ? "vertical" : "horizontal";
+  const found = findSplitForResize(root, targetLeafId, axis);
+  if (!found) return;
+  const { split, isInA } = found;
+
+  let delta = step;
+  if (axis === "vertical") {
+    // H = left (decrease A), L = right (increase A)
+    delta = direction === "left" ? -step : step;
+    split.size = Math.max(
+      0.05,
+      Math.min(0.95, split.size + (isInA ? delta : -delta))
+    );
+  } else {
+    // K = up (decrease A), J = down (increase A)
+    delta = direction === "up" ? -step : step;
+    split.size = Math.max(
+      0.05,
+      Math.min(0.95, split.size + (isInA ? delta : -delta))
+    );
+  }
+  sendState();
+}
+
 // ---------- Leaf wiring ----------
 function wireLeaf(leaf: Leaf) {
   const wc = leaf.view.webContents;
@@ -523,16 +580,29 @@ async function createWindow() {
   win.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
 
-    // When omnibox is focused in renderer, don't handle any global keybinds here
-    if (omniboxFocused) return;
-
     const key = (input.key || "").toLowerCase();
     const isOnlyMeta =
       input.meta && !input.shift && !input.alt && !input.control;
+    const isMetaShift =
+      input.meta && input.shift && !input.alt && !input.control;
     const isOnlyShift =
       input.shift && !input.meta && !input.alt && !input.control;
     const isNoMods =
       !input.meta && !input.shift && !input.alt && !input.control;
+
+    // While omnibox is focused in renderer, disable non-meta keybinds but allow common meta combos
+    if (omniboxFocused) {
+      const allowed =
+        (isOnlyMeta &&
+          (key === "[" || key === "]" || key === "r" || key === "w")) ||
+        (isMetaShift &&
+          (key === "r" ||
+            key === "h" ||
+            key === "j" ||
+            key === "k" ||
+            key === "l"));
+      if (!allowed) return;
+    }
 
     // Space: focus omnibox/input in active pane in the renderer
     if (isNoMods && key === " ") {
@@ -545,6 +615,49 @@ async function createWindow() {
         try {
           win?.webContents.focus();
         } catch {}
+      }
+      return;
+    }
+
+    // Cmd+Shift+H/J/K/L: resize split near active pane
+    if (
+      isMetaShift &&
+      (key === "h" || key === "j" || key === "k" || key === "l")
+    ) {
+      event.preventDefault();
+      const targetId =
+        lastActivePaneId ?? Array.from(leafById.keys())[0] ?? null;
+      if (targetId != null) {
+        const dir =
+          key === "h"
+            ? "left"
+            : key === "l"
+            ? "right"
+            : key === "k"
+            ? "up"
+            : "down";
+        nudgeSplitSize(targetId, dir as any);
+      }
+      return;
+    }
+
+    // Cmd+R (reload) and Shift+Cmd+R (hard reload) on active pane
+    if ((isOnlyMeta && key === "r") || (isMetaShift && key === "r")) {
+      event.preventDefault();
+      const targetId =
+        lastActivePaneId ?? Array.from(leafById.keys())[0] ?? null;
+      const leaf = targetId != null ? leafById.get(targetId) : null;
+      const wc = leaf?.view?.webContents;
+      if (wc) {
+        if (isMetaShift) {
+          try {
+            (wc as any).reloadIgnoringCache?.();
+          } catch {
+            wc.reload();
+          }
+        } else {
+          wc.reload();
+        }
       }
       return;
     }
@@ -769,6 +882,17 @@ ipcMain.on("pane:req-focus-omni", (_e, { paneId }: { paneId: number }) => {
 ipcMain.on("omnibox:focus", (_e, focused: boolean) => {
   omniboxFocused = !!focused;
 });
+
+ipcMain.on(
+  "pane:kb-resize",
+  (
+    _e,
+    { paneId, dir }: { paneId: number; dir: "left" | "right" | "up" | "down" }
+  ) => {
+    const targetId = lastActivePaneId ?? paneId;
+    nudgeSplitSize(targetId, dir);
+  }
+);
 
 app.whenReady().then(createWindow);
 app.on("window-all-closed", () => {
