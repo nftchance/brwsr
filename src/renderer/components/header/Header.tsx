@@ -3,7 +3,6 @@ import type { CSSProperties, KeyboardEvent } from "react";
 
 import { PaneState } from "../../types/pane";
 import { isLikelyUrl, normalizeUrlSmart } from "../../utils/url";
-import { cn } from "../../utils/cn";
 
 export function Header({
     pane,
@@ -75,10 +74,11 @@ export function Header({
     return (
         <div
             style={posStyle}
-            className={cn(
-                "flex items-center h-[30px] px-[2px] py-[1px] z-[1000] box-border border-b-2 text-[#e7e7ea] border-[#1d1f28]",
-                active ? "bg-slate-200" : "bg-slate-900"
-            )}
+            className={[
+                "flex items-center h-[30px] px-[2px] py-[1px] z-[1000] box-border border-b-2",
+                active ? "bg-[#ff0000]" : "bg-slate-900",
+                "text-[#e7e7ea] border-[#1d1f28]",
+            ].join(" ")}
         >
             <input
                 ref={inputRef}
@@ -86,10 +86,7 @@ export function Header({
                 onChange={(e) => setVal(e.target.value)}
                 onKeyDown={onKeyDown}
                 placeholder="Type a URL or search…"
-                className={cn(
-                    "flex-1 h-[26px] border border-[#2b2d36] rounded-[6px] px-[10px] outline-none bg-transparent",
-                    "text-inherit"
-                )}
+                className="flex-1 h-[26px] border border-[#2b2d36] rounded-[6px] px-[10px] outline-none bg-transparent text-inherit"
                 // style={{ WebkitAppRegion: "no-drag" as any }}
                 onFocus={() => window.native.omniboxFocus(true)}
                 onBlur={() => window.native.omniboxFocus(false)}
