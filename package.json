@@ -9,7 +9,7 @@
     "start": "electron ."
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.13",
+    "@tailwindcss/vite": "^4.1.13",
     "@types/react": "^19.1.12",
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.21",
