@@ -29,6 +29,7 @@ export class Pane {
         nodeIntegration: false,
         partition: "persist:default",
         additionalArguments: [`--paneId=${leaf.id}`],
+        transparent: true,
       },
     });
     overlay.setBackgroundColor("#00000000");

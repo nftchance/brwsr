@@ -472,7 +472,18 @@ export class Window {
           k: () => {
             view.webContents.send("pane:scroll", { deltaY: -80 });
           },
-
+          g: () => {
+            view.webContents.scrollToTop();
+          },
+          "shift+g": () => {
+            view.webContents.scrollToBottom();
+          },
+          "shift+d": () => {
+            view.webContents.send("pane:scroll", { deltaY: 320 });
+          },
+          "shift+u": () => {
+            view.webContents.send("pane:scroll", { deltaY: -320 });
+          },
           "shift+h": () => {
             this.onPanesNavigate(event, { id: leaf.id, dir: "left" });
           },
