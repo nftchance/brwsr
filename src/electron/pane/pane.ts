@@ -9,84 +9,121 @@ const devUrl = process.env.VITE_DEV_SERVER_URL || "http://localhost:5173";
 const isDev = !!process.env.ELECTRON_START_URL;
 
 export class Pane {
-  window: BaseWindow;
+    window: BaseWindow;
 
-  id: number;
-  leaf: Leaf;
-  rect: Rect | null;
+    id: number;
+    leaf: Leaf;
+    rect: Rect | null;
 
-  constructor(win: BaseWindow, leaf: Leaf, rect: Rect | null = null) {
-    this.window = win;
+    constructor(win: BaseWindow, leaf: Leaf, rect: Rect | null = null) {
+        this.window = win;
 
-    this.id = leaf.id;
-    this.leaf = leaf;
-    this.rect = rect;
+        this.id = leaf.id;
+        this.leaf = leaf;
+        this.rect = rect;
 
-    const overlay = new WebContentsView({
-      webPreferences: {
-        preload: path.join(__dirname, "preload.js"),
-        contextIsolation: true,
-        nodeIntegration: false,
-        partition: "persist:default",
-        additionalArguments: [`--paneId=${leaf.id}`],
-        transparent: true,
-      },
-    });
-    overlay.setBackgroundColor("#00000000");
-    if (isDev) {
-      overlay.webContents.loadURL(devUrl);
-    } else {
-      const distIndex = path.join(__dirname, "..", "dist", "index.html");
-      if (!fs.existsSync(distIndex)) {
-        throw new Error(
-          `Renderer not built: ${distIndex} missing. Run "pnpm build".`
+        const overlay = new WebContentsView({
+            webPreferences: {
+                preload: path.join(__dirname, "preload.js"),
+                contextIsolation: true,
+                nodeIntegration: false,
+                partition: "persist:default",
+                additionalArguments: [`--paneId=${leaf.id}`],
+                transparent: true,
+            },
+        });
+        overlay.setBackgroundColor("#00000000");
+        if (isDev) {
+            overlay.webContents.loadURL(devUrl);
+        } else {
+            const distIndex = path.join(__dirname, "..", "dist", "index.html");
+            if (!fs.existsSync(distIndex)) {
+                throw new Error(
+                    `Renderer not built: ${distIndex} missing. Run "pnpm build".`
+                );
+            }
+            overlay.webContents.loadFile(distIndex);
+        }
+        this.window.contentView.addChildView(overlay);
+        overlay.setBounds(rect ?? { x: 0, y: 0, width: 1200, height: 600 });
+
+        this.window.contentView.addChildView(leaf.view);
+        /* leaf.view.webContents.openDevTools() */
+
+        this.leaf.layers = [overlay, leaf.view];
+    }
+
+    reverse = () => {
+        const layers = this.leaf.layers ?? [];
+        layers.reverse();
+        for (const layer of layers) {
+            this.window.contentView.addChildView(layer);
+        }
+
+        this.leaf.layers = layers;
+
+        layers[1].webContents.focus();
+        layers[1].webContents.send(
+            "pane:overlay:focus",
+            this.leaf.url === layers[0].webContents.getURL()
         );
-      }
-      overlay.webContents.loadFile(distIndex);
+    };
+
+    navigate = (url: string) => {
+        this.leaf.url = url;
+        this.leaf.view.webContents.loadURL(url);
+    };
+
+    close = () => {
+        for (const layer of this.leaf.layers ?? []) {
+            this.window.contentView.removeChildView(layer);
+        }
+    };
+
+    annotate = async () => {
+        return await this.leaf.view.webContents.executeJavaScript(`
+            (() => {
+                const getTargets = () => {
+                    const selectors = [
+                        'a[href]',
+                        'button',
+                        '[role="button"]',
+                        'input:not([type="hidden"])',
+                        'textarea',
+                        'summary',
+                        '[tabindex]:not([tabindex="-1"])'
+                    ];
+
+                    
+                    const els = Array.from(document.querySelectorAll(selectors.join(',')))
+                        .filter(el => {
+                            const r = el.getBoundingClientRect();
+                            const style = window.getComputedStyle(el);
+                            return r.width > 8 && r.height > 8 && style.visibility !== 'hidden' && style.display !== 'none';
+                        });
+
+                    return els.map(el => ({ 
+                        el, 
+                        rect: el.getBoundingClientRect(), 
+                        tag: el.tagName.toLowerCase(), 
+                        html: el.innerHTML,
+                        href: el.href 
+                    }));
+                };  
+
+                return getTargets();
+            })()`
+        )
     }
-    this.window.contentView.addChildView(overlay);
-    overlay.setBounds(rect ?? { x: 0, y: 0, width: 1200, height: 600 });
 
-    this.window.contentView.addChildView(leaf.view);
+    html = async (): Promise<string> => {
+        return await this.leaf.view.webContents.executeJavaScript(`
+            document.documentElement.outerHTML
+        `)
+    };
 
-    this.leaf.layers = [overlay, leaf.view];
-  }
-
-  reverse = () => {
-    const layers = this.leaf.layers ?? [];
-    layers.reverse();
-    for (const layer of layers) {
-      this.window.contentView.addChildView(layer);
-    }
-
-    this.leaf.layers = layers;
-
-    layers[1].webContents.focus();
-    layers[1].webContents.send(
-      "pane:overlay:focus",
-      this.leaf.url === layers[0].webContents.getURL()
-    );
-  };
-
-  navigate = (url: string) => {
-    this.leaf.url = url;
-    this.leaf.view.webContents.loadURL(url);
-  };
-
-  close = () => {
-    for (const layer of this.leaf.layers ?? []) {
-      this.window.contentView.removeChildView(layer);
-    }
-  };
-
-  html = async (): Promise<string> => {
-    return await this.leaf.view.webContents.executeJavaScript(`
-        document.documentElement.outerHTML
-    `);
-  };
-
-  backgroundColor = async (): Promise<string> => {
-    return await this.leaf.view.webContents.executeJavaScript(`
+    backgroundColor = async (): Promise<string> => {
+        return await this.leaf.view.webContents.executeJavaScript(`
         (() => {
           const selectors = [
             'body',
@@ -132,51 +169,51 @@ export class Pane {
           return docBgColor && docBgColor !== 'rgba(0, 0, 0, 0)' ? docBgColor : '';
         })()
     `);
-  };
+    };
 
-  favicon = async (): Promise<string> => {
-    const currentUrl = this.leaf.view.webContents.getURL();
+    favicon = async (): Promise<string> => {
+        const currentUrl = this.leaf.view.webContents.getURL();
 
-    const pageFavicon = await this.leaf.view.webContents.executeJavaScript(`
-        (() => {
-          const selectors = [
-            'link[rel="icon"]',
-            'link[rel="shortcut icon"]',
-            'link[rel="apple-touch-icon"]',
-            'link[rel="apple-touch-icon-precomposed"]'
-          ];
-          
-          for (const selector of selectors) {
-            const link = document.querySelector(selector);
-            if (link && link.href) {
-              return link.href;
-            }
-          }
-          
-          return null;
-        })()
-    `);
+        const pageFavicon = await this.leaf.view.webContents.executeJavaScript(`
+            (() => {
+              const selectors = [
+                'link[rel="icon"]',
+                'link[rel="shortcut icon"]',
+                'link[rel="apple-touch-icon"]',
+                'link[rel="apple-touch-icon-precomposed"]'
+              ];
+              
+              for (const selector of selectors) {
+                const link = document.querySelector(selector);
+                if (link && link.href) {
+                  return link.href;
+                }
+              }
+              
+              return null;
+            })()
+        `);
 
-    if (pageFavicon) {
-      return pageFavicon;
-    }
+        if (pageFavicon) {
+            return pageFavicon;
+        }
 
-    try {
-      const url = new URL(currentUrl);
-      return `${url.protocol}//${url.host}/favicon.ico`;
-    } catch {
-      return "";
-    }
-  };
+        try {
+            const url = new URL(currentUrl);
+            return `${url.protocol}//${url.host}/favicon.ico`;
+        } catch {
+            return "";
+        }
+    };
 
-  description = async (): Promise<string> => {
-    return await this.leaf.view.webContents.executeJavaScript(`
-        document.querySelector('meta[name="description"]')?.content || ''
-   `);
-  };
+    description = async (): Promise<string> => {
+        return await this.leaf.view.webContents.executeJavaScript(`
+             document.querySelector('meta[name="description"]')?.content || ''
+        `);
+    };
 
-  image = async (): Promise<string> => {
-    return await this.leaf.view.webContents.executeJavaScript(`
+    image = async (): Promise<string> => {
+        return await this.leaf.view.webContents.executeJavaScript(`
         (() => {
           // Try multiple image selectors in order of preference
           const selectors = [
@@ -197,10 +234,10 @@ export class Pane {
           return '';
         })()
     `);
-  };
+    };
 
-  textColor = async (): Promise<string> => {
-    return await this.leaf.view.webContents.executeJavaScript(`
+    textColor = async (): Promise<string> => {
+        return await this.leaf.view.webContents.executeJavaScript(`
         (() => {
           const selectors = [
             'body',
@@ -239,5 +276,5 @@ export class Pane {
           return bodyColor && bodyColor !== 'rgba(0, 0, 0, 0)' ? bodyColor : '';
         })()
     `);
-  };
+    };
 }

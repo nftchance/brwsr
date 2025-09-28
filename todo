@@ -1,0 +1,6 @@
+- [ ] Get the search bar working better.
+    - [ ] When we press enter in the search bar it should close because the user is ready to browse their content.
+    - [ ] If the url does not change when we leave search mode there is no reason to refetch/refresh.
+- [ ] Fine-tune vimium experience.
+    - [ ] Right now when you have an input focused in the content and press 'f', it shows Vimium even though we are typing.
+    - [ ] It seems like a lot of our keybinds are firing when are not in search mode. We should take care of resolving this. 

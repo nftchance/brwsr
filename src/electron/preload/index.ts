@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from "electron";
 
-import { PaneState, Rect, Leaf } from "./pane/types";
+import { PaneState, Rect, Leaf } from "../pane/types";
 
 const arg = process.argv.find((a) => a.startsWith("--paneId="));
 const paneId = arg ? Number(arg.split("=")[1]) : -1;

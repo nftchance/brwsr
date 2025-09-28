@@ -2,12 +2,12 @@ import { BaseWindow, ipcMain, Menu, WebContentsView } from "electron";
 
 import { Leaf, Split, Node, Rect, PaneState } from "../pane/types";
 import {
-  sendState,
-  replaceChild,
-  findParent,
-  layout,
-  nudgeSplitSize,
-  replaceNode,
+    sendState,
+    replaceChild,
+    findParent,
+    layout,
+    nudgeSplitSize,
+    replaceNode,
 } from "../pane/layout";
 import { Pane } from "../pane/pane";
 import { allocId, contentSize, error } from "../pane/utils";
@@ -15,571 +15,587 @@ import { allocId, contentSize, error } from "../pane/utils";
 import * as path from "path";
 
 export class Window {
-  paneById = new Map<number, Pane>();
-  lastActivePaneId: number | null = null;
+    paneById = new Map<number, Pane>();
+    lastActivePaneId: number | null = null;
 
-  window: BaseWindow;
-  root: Node | null = null;
+    window: BaseWindow;
+    root: Node | null = null;
 
-  constructor() {
-    Menu.setApplicationMenu(null);
-    this.window = new BaseWindow({
-      width: 1200,
-      height: 800,
-      frame: false,
-      titleBarStyle: "hidden",
-      backgroundColor: "#00000000",
-    });
-    this.window.on("closed", () => {
-      this.paneById.forEach((pane) => pane.close());
-      this.window?.getChildWindows().forEach((child) => child.close());
-    });
+    constructor() {
+        Menu.setApplicationMenu(null);
+        this.window = new BaseWindow({
+            width: 1200,
+            height: 800,
+            frame: false,
+            titleBarStyle: "hidden",
+            backgroundColor: "#00000000",
+        });
+        this.window.on("closed", () => {
+            this.paneById.forEach((pane) => pane.close());
+            this.window?.getChildWindows().forEach((child) => child.close());
+        });
 
-    try {
-      if (process.platform === "darwin")
-        this.window.setWindowButtonVisibility(false);
-    } catch {}
+        try {
+            if (process.platform === "darwin")
+                this.window.setWindowButtonVisibility(false);
+        } catch { }
 
-    this.window.on("resize", () => sendState(this.window, this.root));
-  }
-
-  init = async () => {
-    const first = await this.create("https://staging.onplug.io");
-    await this.split(first, "vertical", "right", "https://onplug.io");
-
-    ipcMain.handle("panes:create", this.handlePanesCreate);
-    ipcMain.handle("panes:list", this.handlePanesList);
-    ipcMain.handle("pane:get", this.handlePaneGet);
-    ipcMain.handle("pane:overlay", this.handlePaneOverlay);
-    ipcMain.handle("pane:navigate", this.handlePaneNavigate);
-    ipcMain.handle("pane:active", this.handlePaneActive);
-
-    ipcMain.on("panes:navigate", this.onPanesNavigate);
-    ipcMain.on("pane:scroll", this.onPaneScroll);
-    ipcMain.on("pane:close", this.onPaneClose);
-    ipcMain.on("pane:split", this.onPaneSplit);
-    ipcMain.on("pane:resize", this.onPaneResize);
-  };
-
-  create = async (url: string) => {
-    if (!this.root) {
-      const pane = await this.make(url);
-
-      this.root = pane.leaf;
-      this.lastActivePaneId = pane.id;
-
-      sendState(this.window, this.root);
-
-      return pane.id;
+        this.window.on("resize", () => sendState(this.window, this.root));
     }
 
-    const last = Array.from(this.paneById.values()).slice(-1)[0];
-    return this.split(last.id, "vertical", "right", url);
-  };
+    init = async () => {
+        const first = await this.create("https://staging.onplug.io");
+        await this.split(first, "vertical", "right", "https://onplug.io");
 
-  make = async (url: string): Promise<Pane> => {
-    if (!this.window) throw new Error("No window to attach pane to");
+        ipcMain.handle("panes:create", this.handlePanesCreate);
+        ipcMain.handle("panes:list", this.handlePanesList);
+        ipcMain.handle("pane:get", this.handlePaneGet);
+        ipcMain.handle("pane:overlay", this.handlePaneOverlay);
+        ipcMain.handle("pane:navigate", this.handlePaneNavigate);
+        ipcMain.handle("pane:active", this.handlePaneActive);
 
-    const id = allocId();
-
-    const view = new WebContentsView({
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        partition: "persist:default",
-        preload: path.join(__dirname, "pane_preload.js"),
-        additionalArguments: [`--paneId=${id}`],
-      },
-    });
-
-    const leaf: Leaf = { kind: "leaf", id, view, url };
-    const pane = new Pane(this.window, leaf);
-    this.paneById.set(id, pane);
-
-    this.subscribe(pane);
-    await view.webContents.loadURL(url);
-    leaf.title = view.webContents.getTitle();
-
-    this.focus(pane.id);
-
-    sendState(this.window, this.root, pane);
-
-    return pane;
-  };
-
-  focus = (id: number) => {
-    const pane = this.paneById.get(id);
-
-    if (!pane) return;
-
-    this.lastActivePaneId = pane.id;
-
-    try {
-      this.window?.focus();
-    } catch {}
-
-    try {
-      pane?.leaf.view?.webContents?.focus?.();
-    } catch {}
-  };
-
-  split = async (
-    id: number,
-    dir: "vertical" | "horizontal",
-    side: "left" | "right" | "up" | "down",
-    url?: string
-  ) => {
-    if (!this.root) return -1;
-
-    const child = this.paneById.get(id);
-    if (!child) return -1;
-
-    const target = child.leaf;
-
-    const parent = findParent(this.root, id);
-    const pane = await this.make(url || "https://example.com");
-    const other = pane.leaf;
-
-    let node: Split;
-
-    if (dir === "vertical") {
-      if (side === "left")
-        node = { kind: "split", dir, size: 0.5, a: other, b: target };
-      else node = { kind: "split", dir, size: 0.5, a: target, b: other };
-    } else {
-      if (side === "up")
-        node = { kind: "split", dir, size: 0.5, a: other, b: target };
-      else node = { kind: "split", dir, size: 0.5, a: target, b: other };
-    }
-
-    if (!parent) this.root = node;
-    else replaceChild(parent, target, node);
-
-    this.lastActivePaneId = other.id;
-
-    this.focus(other.id);
-
-    sendState(this.window, this.root, pane);
-    return other.id;
-  };
-
-  close = (id: number) => {
-    if (!this.root || !this.window) return;
-
-    const listBefore: { id: number; rect: Rect }[] = (() => {
-      const out: PaneState[] = [];
-      const { w, h } = contentSize(this.window);
-
-      if (this.root)
-        layout(
-          this.window,
-          this.root,
-          { x: 0, y: 0, width: w, height: h },
-          out
-        );
-
-      return out.map((p) => ({ id: p.id, rect: p.rect }));
-    })();
-
-    const closedRect = listBefore.find((p) => p.id === id)?.rect;
-    let nextActive: number | null = null;
-    if (closedRect) {
-      let best: { id: number; d2: number } | null = null;
-      const cx = closedRect.x + closedRect.width / 2;
-      const cy = closedRect.y + closedRect.height / 2;
-      for (const p of listBefore) {
-        if (p.id === id) continue;
-        const px = p.rect.x + p.rect.width / 2;
-        const py = p.rect.y + p.rect.height / 2;
-        const dx = px - cx;
-        const dy = py - cy;
-        const d2 = dx * dx + dy * dy;
-        if (!best || d2 < best.d2) best = { id: p.id, d2 };
-      }
-      nextActive = best?.id ?? null;
-    }
-
-    const pane = this.paneById.get(id);
-
-    if (!pane) return;
-
-    try {
-      this.window.contentView.removeChildView(pane.leaf.view);
-    } catch {}
-    try {
-      (pane.leaf.view as any)?.destroy?.();
-    } catch {}
-    this.paneById.delete(id);
-
-    if (this.root.kind === "leaf" && (this.root as any).id === id) {
-      this.root = null;
-      sendState(this.window, this.root, null);
-      this.window.close();
-      return;
-    }
-    this.root = replaceNode(this.root, id);
-    sendState(this.window, this.root, null);
-
-    if (nextActive != null && this.paneById.has(nextActive)) {
-      this.lastActivePaneId = nextActive;
-      this.focus(nextActive);
-    }
-  };
-
-  getAll = (): { id: number; rect: Rect }[] => {
-    const out: PaneState[] = [];
-    if (this.root && this.window) {
-      const { w, h } = contentSize(this.window);
-      layout(this.window, this.root, { x: 0, y: 0, width: w, height: h }, out);
-    }
-    return out.map((p) => ({ id: p.id, rect: p.rect }));
-  };
-
-  getNeighbor = (
-    currentId: number,
-    dir: "left" | "right" | "up" | "down"
-  ): number | null => {
-    const panes = this.getAll();
-    const cur = panes.find((p) => p.id === currentId);
-    if (!cur) return null;
-
-    const curLeft = cur.rect.x;
-    const curRight = cur.rect.x + cur.rect.width;
-    const curTop = cur.rect.y;
-    const curBottom = cur.rect.y + cur.rect.height;
-    const cx = (curLeft + curRight) / 2;
-    const cy = (curTop + curBottom) / 2;
-
-    const isHorizontal = dir === "left" || dir === "right";
-    const correctSide = (dx: number, dy: number) =>
-      dir === "left"
-        ? dx < 0
-        : dir === "right"
-        ? dx > 0
-        : dir === "up"
-        ? dy < 0
-        : dy > 0;
-
-    const overlapsOrth = (r: Rect) => {
-      const left = r.x;
-      const right = r.x + r.width;
-      const top = r.y;
-      const bottom = r.y + r.height;
-      if (isHorizontal) {
-        return Math.max(curTop, top) < Math.min(curBottom, bottom);
-      } else {
-        return Math.max(curLeft, left) < Math.min(curRight, right);
-      }
+        ipcMain.on("panes:navigate", this.onPanesNavigate);
+        ipcMain.on("pane:biscuits", this.onPaneBiscuits);
+        ipcMain.on("pane:scroll", this.onPaneScroll);
+        ipcMain.on("pane:close", this.onPaneClose);
+        ipcMain.on("pane:split", this.onPaneSplit);
+        ipcMain.on("pane:resize", this.onPaneResize);
     };
 
-    type Cand = { id: number; primary: number; secondary: number };
-    const overlapCands: Cand[] = [];
-    const fallbackCands: Cand[] = [];
+    create = async (url: string) => {
+        if (!this.root) {
+            const pane = await this.make(url);
 
-    for (const p of panes) {
-      if (p.id === currentId) continue;
-      const px = p.rect.x + p.rect.width / 2;
-      const py = p.rect.y + p.rect.height / 2;
-      const dx = px - cx;
-      const dy = py - cy;
-      if (!correctSide(dx, dy)) continue;
-      const primary = Math.abs(isHorizontal ? dx : dy);
-      const secondary = Math.abs(isHorizontal ? dy : dx);
-      const cand: Cand = { id: p.id, primary, secondary };
-      if (overlapsOrth(p.rect)) overlapCands.push(cand);
-      else fallbackCands.push(cand);
-    }
+            this.root = pane.leaf;
+            this.lastActivePaneId = pane.id;
 
-    const pickByPrimaryThenSecondary = (list: Cand[]): number | null => {
-      if (!list.length) return null;
-      list.sort(
-        (a, b) =>
-          a.primary - b.primary || a.secondary - b.secondary || a.id - b.id
-      );
-      return list[0].id;
+            sendState(this.window, this.root);
+
+            return pane.id;
+        }
+
+        const last = Array.from(this.paneById.values()).slice(-1)[0];
+        return this.split(last.id, "vertical", "right", url);
     };
 
-    const overlapPick = pickByPrimaryThenSecondary(overlapCands);
-    if (overlapPick != null) return overlapPick;
+    make = async (url: string): Promise<Pane> => {
+        if (!this.window) throw new Error("No window to attach pane to");
 
-    if (fallbackCands.length) {
-      fallbackCands.sort((a, b) => {
-        const angA = a.secondary / Math.max(1, a.primary);
-        const angB = b.secondary / Math.max(1, b.primary);
-        if (angA !== angB) return angA - angB;
-        const distA = Math.hypot(a.primary, a.secondary);
-        const distB = Math.hypot(b.primary, b.secondary);
-        if (distA !== distB) return distA - distB;
-        return a.id - b.id;
-      });
-      return fallbackCands[0].id;
-    }
+        const id = allocId();
 
-    return null;
-  };
+        const view = new WebContentsView({
+            webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+                sandbox: true,
+                partition: "persist:default",
+                preload: path.join(__dirname, "preload", "pane.js"),
+                additionalArguments: [`--paneId=${id}`],
+            },
+        });
 
-  handlePanesCreate = (_: unknown, payload: { url: string; rect: Rect }) =>
-    this.create(payload.url || "https://example.com");
+        const leaf: Leaf = { kind: "leaf", id, view, url };
+        const pane = new Pane(this.window, leaf);
+        this.paneById.set(id, pane);
 
-  handlePanesList = () => {
-    const out: PaneState[] = [];
-    if (this.root) {
-      const { w, h } = contentSize(this.window);
-      layout(this.window, this.root, { x: 0, y: 0, width: w, height: h }, out);
-    }
-    return out;
-  };
+        this.subscribe(pane);
+        await view.webContents.loadURL(url);
+        leaf.title = view.webContents.getTitle();
 
-  handlePaneGet = (_: unknown, { id }: { id: number }) => {
-    return this.paneById.get(id)?.leaf;
-  };
+        this.focus(pane.id);
 
-  onPanesNavigate = (
-    e: Electron.Event,
-    { id, dir }: { id: number; dir: "left" | "right" | "up" | "down" }
-  ) => {
-    e.preventDefault();
-    const start = this.lastActivePaneId ?? id;
-    if (!this.paneById.has(start)) return;
-    const next = this.getNeighbor(start, dir);
-    if (next != null && this.paneById.has(next)) {
-      this.lastActivePaneId = next;
-      this.focus(next);
-    }
-  };
+        sendState(this.window, this.root, pane);
 
-  handlePaneNavigate = (_: unknown, payload: { id: number; url: string }) => {
-    this.paneById.get(payload.id)?.navigate(payload.url);
-  };
+        return pane;
+    };
 
-  handlePaneActive = (_: unknown, { id }: { id: number }) => {
-    if (!this.paneById.has(id)) return;
-    this.lastActivePaneId = id;
-  };
+    focus = (id: number) => {
+        const pane = this.paneById.get(id);
 
-  handlePaneOverlay = (_: unknown, { id }: { id: number }) => {
-    const pane = this.paneById.get(id);
-    if (!pane) return;
-    pane.reverse();
-  };
+        if (!pane) return;
 
-  onPaneScroll = (
-    _: unknown,
-    { id, deltaY }: { id: number; deltaY: number }
-  ) => {
-    const targetId = this.lastActivePaneId ?? id;
-    const pane = this.paneById.get(targetId);
-    if (!pane) return;
-    try {
-      pane.leaf.view.webContents.send("pane:scroll", { deltaY });
-    } catch {}
-  };
+        this.lastActivePaneId = pane.id;
 
-  onPaneClose = (_: unknown, { paneId }: { paneId: number }) => {
-    this.close(paneId);
+        try {
+            this.window?.focus();
+        } catch { }
 
-    if (!this.root) this.window?.close();
-  };
+        try {
+            pane?.leaf.view?.webContents?.focus?.();
+        } catch { }
+    };
 
-  onPaneSplit = (
-    event: Electron.Event,
-    payload: {
-      id: number;
-      dir: "vertical" | "horizontal";
-      side: "left" | "right" | "up" | "down";
-    }
-  ) => {
-    event.preventDefault();
-    const targetId = this.lastActivePaneId ?? payload.id;
-    this.split(targetId, payload.dir, payload.side);
-  };
+    split = async (
+        id: number,
+        dir: "vertical" | "horizontal",
+        side: "left" | "right" | "up" | "down",
+        url?: string
+    ) => {
+        if (!this.root) return -1;
 
-  onPaneResize = (
-    _: unknown,
-    { id, dir }: { id: number; dir: "left" | "right" | "up" | "down" }
-  ) => {
-    const targetId = this.lastActivePaneId ?? id;
-    nudgeSplitSize(this.window, this.root, targetId, dir);
-  };
+        const child = this.paneById.get(id);
+        if (!child) return -1;
 
-  subscribe = (pane: Pane) => {
-    const leaf = pane.leaf;
+        const target = child.leaf;
 
-    for (const view of leaf.layers ?? []) {
-      const wc = view.webContents;
+        const parent = findParent(this.root, id);
+        const pane = await this.make(url || "https://example.com");
+        const other = pane.leaf;
 
-      const sync = async () => {
-        if (leaf.view.webContents.getURL() !== view.webContents.getURL()) {
-          return;
+        let node: Split;
+
+        if (dir === "vertical") {
+            if (side === "left")
+                node = { kind: "split", dir, size: 0.5, a: other, b: target };
+            else node = { kind: "split", dir, size: 0.5, a: target, b: other };
+        } else {
+            if (side === "up")
+                node = { kind: "split", dir, size: 0.5, a: other, b: target };
+            else node = { kind: "split", dir, size: 0.5, a: target, b: other };
         }
 
-        const current = wc.getURL();
-        if (!current.startsWith("data:")) {
-          leaf.url = current || leaf.url;
-        }
-        leaf.title = wc.getTitle();
-        leaf.html = await pane.html();
+        if (!parent) this.root = node;
+        else replaceChild(parent, target, node);
 
-        const backgroundColor = await pane.backgroundColor();
-        const textColor = await pane.textColor();
-        const description = await pane.description();
-        const favicon = await pane.favicon();
-        const image = await pane.image();
+        this.lastActivePaneId = other.id;
 
-        leaf.backgroundColor = backgroundColor;
-        leaf.textColor = textColor;
-        leaf.description = description;
-        leaf.favicon = favicon;
-        leaf.image = image;
-      };
+        this.focus(other.id);
 
-      wc.on("did-navigate", sync);
-      wc.on("did-navigate-in-page", sync);
-      wc.on("page-title-updated", sync);
-      wc.once("destroyed", () => {
-        wc.removeListener("did-navigate", sync);
-        wc.removeListener("did-navigate-in-page", sync);
-        wc.removeListener("page-title-updated", sync);
-      });
+        sendState(this.window, this.root, pane);
+        return other.id;
+    };
 
-      wc.on(
-        "did-fail-load",
-        (_e, errorCode, errorDesc, validatedURL, isMainFrame) => {
-          if (!isMainFrame) return;
-          if (errorCode === -3) return;
-          const html = error(validatedURL, errorCode, errorDesc);
-          wc.loadURL(
-            `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
-            {
-              baseURLForDataURL: validatedURL || "about:blank",
+    close = (id: number) => {
+        if (!this.root || !this.window) return;
+
+        const listBefore: { id: number; rect: Rect }[] = (() => {
+            const out: PaneState[] = [];
+            const { w, h } = contentSize(this.window);
+
+            if (this.root)
+                layout(
+                    this.window,
+                    this.root,
+                    { x: 0, y: 0, width: w, height: h },
+                    out
+                );
+
+            return out.map((p) => ({ id: p.id, rect: p.rect }));
+        })();
+
+        const closedRect = listBefore.find((p) => p.id === id)?.rect;
+        let nextActive: number | null = null;
+        if (closedRect) {
+            let best: { id: number; d2: number } | null = null;
+            const cx = closedRect.x + closedRect.width / 2;
+            const cy = closedRect.y + closedRect.height / 2;
+            for (const p of listBefore) {
+                if (p.id === id) continue;
+                const px = p.rect.x + p.rect.width / 2;
+                const py = p.rect.y + p.rect.height / 2;
+                const dx = px - cx;
+                const dy = py - cy;
+                const d2 = dx * dx + dy * dy;
+                if (!best || d2 < best.d2) best = { id: p.id, d2 };
             }
-          );
-        }
-      );
-
-      wc.on("before-input-event", (event, input) => {
-        if (input.type !== "keyDown") return;
-
-        const keybinds = {
-          " ": () => {
-            event.preventDefault();
-            pane.reverse();
-          },
-          j: () => {
-            view.webContents.send("pane:scroll", { deltaY: 80 });
-          },
-          k: () => {
-            view.webContents.send("pane:scroll", { deltaY: -80 });
-          },
-          g: () => {
-            view.webContents.scrollToTop();
-          },
-          "shift+g": () => {
-            view.webContents.scrollToBottom();
-          },
-          "shift+d": () => {
-            view.webContents.send("pane:scroll", { deltaY: 320 });
-          },
-          "shift+u": () => {
-            view.webContents.send("pane:scroll", { deltaY: -320 });
-          },
-          "shift+h": () => {
-            this.onPanesNavigate(event, { id: leaf.id, dir: "left" });
-          },
-          "shift+l": () => {
-            this.onPanesNavigate(event, { id: leaf.id, dir: "right" });
-          },
-          "shift+k": () => {
-            this.onPanesNavigate(event, { id: leaf.id, dir: "up" });
-          },
-          "shift+j": () => {
-            this.onPanesNavigate(event, { id: leaf.id, dir: "down" });
-          },
-          "meta+w": () => {
-            event.preventDefault();
-            this.close(leaf.id);
-
-            if (!this.root) this.window?.close();
-          },
-          "meta+r": () => {
-            event.preventDefault();
-            view.webContents.reload();
-          },
-          "meta+shift+r": () => {
-            event.preventDefault();
-            view.webContents.reloadIgnoringCache();
-          },
-          "meta+[": () => {
-            event.preventDefault();
-            if (view.webContents.canGoBack()) view.webContents.goBack();
-          },
-          "meta+]": () => {
-            event.preventDefault();
-            if (view.webContents.canGoForward()) view.webContents.goForward();
-          },
-          "meta+h": () => {
-            this.onPaneSplit(event, {
-              id: leaf.id,
-              dir: "vertical",
-              side: "left",
-            });
-          },
-          "meta+l": () => {
-            this.onPaneSplit(event, {
-              id: leaf.id,
-              dir: "vertical",
-              side: "right",
-            });
-          },
-          "meta+k": () => {
-            this.onPaneSplit(event, {
-              id: leaf.id,
-              dir: "horizontal",
-              side: "up",
-            });
-          },
-          "meta+j": () => {
-            this.onPaneSplit(event, {
-              id: leaf.id,
-              dir: "horizontal",
-              side: "down",
-            });
-          },
-          "meta+shift+h": () => {
-            this.onPaneResize(event, { id: leaf.id, dir: "left" });
-          },
-          "meta+shift+l": () => {
-            this.onPaneResize(event, { id: leaf.id, dir: "right" });
-          },
-          "meta+shift+k": () => {
-            this.onPaneResize(event, { id: leaf.id, dir: "up" });
-          },
-          "meta+shift+j": () => {
-            this.onPaneResize(event, { id: leaf.id, dir: "down" });
-          },
-        };
-
-        const buildKeybindString = (input: Electron.Input) => {
-          const modifiers: string[] = [];
-          if (input.meta) modifiers.push("meta");
-          if (input.shift) modifiers.push("shift");
-          if (input.alt) modifiers.push("alt");
-          if (input.control) modifiers.push("control");
-
-          const key = input.key?.toLowerCase();
-          return modifiers.length > 0 ? `${modifiers.join("+")}+${key}` : key;
-        };
-
-        const keybindString = buildKeybindString(input);
-        const keybind = keybinds[keybindString];
-        if (keybind) {
-          keybind();
-          sendState(this.window, this.root, pane);
+            nextActive = best?.id ?? null;
         }
 
-        return;
-      });
-    }
-  };
+        const pane = this.paneById.get(id);
+
+        if (!pane) return;
+
+        try {
+            this.window.contentView.removeChildView(pane.leaf.view);
+        } catch { }
+        try {
+            (pane.leaf.view as any)?.destroy?.();
+        } catch { }
+        this.paneById.delete(id);
+
+        if (this.root.kind === "leaf" && (this.root as any).id === id) {
+            this.root = null;
+            sendState(this.window, this.root, null);
+            this.window.close();
+            return;
+        }
+        this.root = replaceNode(this.root, id);
+        sendState(this.window, this.root, null);
+
+        if (nextActive != null && this.paneById.has(nextActive)) {
+            this.lastActivePaneId = nextActive;
+            this.focus(nextActive);
+        }
+    };
+
+    getAll = (): { id: number; rect: Rect }[] => {
+        const out: PaneState[] = [];
+        if (this.root && this.window) {
+            const { w, h } = contentSize(this.window);
+            layout(this.window, this.root, { x: 0, y: 0, width: w, height: h }, out);
+        }
+        return out.map((p) => ({ id: p.id, rect: p.rect }));
+    };
+
+    getNeighbor = (
+        currentId: number,
+        dir: "left" | "right" | "up" | "down"
+    ): number | null => {
+        const panes = this.getAll();
+        const cur = panes.find((p) => p.id === currentId);
+        if (!cur) return null;
+
+        const curLeft = cur.rect.x;
+        const curRight = cur.rect.x + cur.rect.width;
+        const curTop = cur.rect.y;
+        const curBottom = cur.rect.y + cur.rect.height;
+        const cx = (curLeft + curRight) / 2;
+        const cy = (curTop + curBottom) / 2;
+
+        const isHorizontal = dir === "left" || dir === "right";
+        const correctSide = (dx: number, dy: number) =>
+            dir === "left"
+                ? dx < 0
+                : dir === "right"
+                    ? dx > 0
+                    : dir === "up"
+                        ? dy < 0
+                        : dy > 0;
+
+        const overlapsOrth = (r: Rect) => {
+            const left = r.x;
+            const right = r.x + r.width;
+            const top = r.y;
+            const bottom = r.y + r.height;
+            if (isHorizontal) {
+                return Math.max(curTop, top) < Math.min(curBottom, bottom);
+            } else {
+                return Math.max(curLeft, left) < Math.min(curRight, right);
+            }
+        };
+
+        type Cand = { id: number; primary: number; secondary: number };
+        const overlapCands: Cand[] = [];
+        const fallbackCands: Cand[] = [];
+
+        for (const p of panes) {
+            if (p.id === currentId) continue;
+            const px = p.rect.x + p.rect.width / 2;
+            const py = p.rect.y + p.rect.height / 2;
+            const dx = px - cx;
+            const dy = py - cy;
+            if (!correctSide(dx, dy)) continue;
+            const primary = Math.abs(isHorizontal ? dx : dy);
+            const secondary = Math.abs(isHorizontal ? dy : dx);
+            const cand: Cand = { id: p.id, primary, secondary };
+            if (overlapsOrth(p.rect)) overlapCands.push(cand);
+            else fallbackCands.push(cand);
+        }
+
+        const pickByPrimaryThenSecondary = (list: Cand[]): number | null => {
+            if (!list.length) return null;
+            list.sort(
+                (a, b) =>
+                    a.primary - b.primary || a.secondary - b.secondary || a.id - b.id
+            );
+            return list[0].id;
+        };
+
+        const overlapPick = pickByPrimaryThenSecondary(overlapCands);
+        if (overlapPick != null) return overlapPick;
+
+        if (fallbackCands.length) {
+            fallbackCands.sort((a, b) => {
+                const angA = a.secondary / Math.max(1, a.primary);
+                const angB = b.secondary / Math.max(1, b.primary);
+                if (angA !== angB) return angA - angB;
+                const distA = Math.hypot(a.primary, a.secondary);
+                const distB = Math.hypot(b.primary, b.secondary);
+                if (distA !== distB) return distA - distB;
+                return a.id - b.id;
+            });
+            return fallbackCands[0].id;
+        }
+
+        return null;
+    };
+
+    handlePanesCreate = (_: unknown, payload: { url: string; rect: Rect }) =>
+        this.create(payload.url || "https://example.com");
+
+    handlePanesList = () => {
+        const out: PaneState[] = [];
+        if (this.root) {
+            const { w, h } = contentSize(this.window);
+            layout(this.window, this.root, { x: 0, y: 0, width: w, height: h }, out);
+        }
+        return out;
+    };
+
+    handlePaneGet = (_: unknown, { id }: { id: number }) => {
+        return this.paneById.get(id)?.leaf;
+    };
+
+    onPanesNavigate = (
+        e: Electron.Event,
+        { id, dir }: { id: number; dir: "left" | "right" | "up" | "down" }
+    ) => {
+        e.preventDefault();
+        const start = this.lastActivePaneId ?? id;
+        if (!this.paneById.has(start)) return;
+        const next = this.getNeighbor(start, dir);
+        if (next != null && this.paneById.has(next)) {
+            this.lastActivePaneId = next;
+            this.focus(next);
+        }
+    };
+
+    handlePaneNavigate = (_: unknown, payload: { id: number; url: string }) => {
+        this.paneById.get(payload.id)?.navigate(payload.url);
+    };
+
+    handlePaneActive = (_: unknown, { id }: { id: number }) => {
+        if (!this.paneById.has(id)) return;
+        this.lastActivePaneId = id;
+    };
+
+    handlePaneOverlay = (_: unknown, { id }: { id: number }) => {
+        const pane = this.paneById.get(id);
+        if (!pane) return;
+        pane.reverse();
+    };
+
+    onPaneBiscuits = (
+        _: unknown,
+        { id }: { id: number }
+    ) => {
+        const targetId = this.lastActivePaneId ?? id;
+        const pane = this.paneById.get(targetId);
+        if (!pane) return;
+        try {
+            pane.leaf.view.webContents.send("pane:biscuits");
+        } catch { }
+    };
+
+    onPaneScroll = (
+        _: unknown,
+        { id, deltaY }: { id: number; deltaY: number }
+    ) => {
+        const targetId = this.lastActivePaneId ?? id;
+        const pane = this.paneById.get(targetId);
+        if (!pane) return;
+        try {
+            pane.leaf.view.webContents.send("pane:scroll", { deltaY });
+        } catch { }
+    };
+
+    onPaneClose = (_: unknown, { paneId }: { paneId: number }) => {
+        this.close(paneId);
+
+        if (!this.root) this.window?.close();
+    };
+
+    onPaneSplit = (
+        event: Electron.Event,
+        payload: {
+            id: number;
+            dir: "vertical" | "horizontal";
+            side: "left" | "right" | "up" | "down";
+        }
+    ) => {
+        event.preventDefault();
+        const targetId = this.lastActivePaneId ?? payload.id;
+        this.split(targetId, payload.dir, payload.side);
+    };
+
+    onPaneResize = (
+        _: unknown,
+        { id, dir }: { id: number; dir: "left" | "right" | "up" | "down" }
+    ) => {
+        const targetId = this.lastActivePaneId ?? id;
+        nudgeSplitSize(this.window, this.root, targetId, dir);
+    };
+
+    subscribe = (pane: Pane) => {
+        const leaf = pane.leaf;
+
+        for (const view of leaf.layers ?? []) {
+            const wc = view.webContents;
+
+            const sync = async () => {
+                if (leaf.view.webContents.getURL() !== view.webContents.getURL()) {
+                    return;
+                }
+
+                const current = wc.getURL();
+                if (!current.startsWith("data:")) {
+                    leaf.url = current || leaf.url;
+                }
+                leaf.title = wc.getTitle();
+                leaf.html = await pane.html();
+
+                const backgroundColor = await pane.backgroundColor();
+                const textColor = await pane.textColor();
+                const description = await pane.description();
+                const favicon = await pane.favicon();
+                const image = await pane.image();
+
+                leaf.backgroundColor = backgroundColor;
+                leaf.textColor = textColor;
+                leaf.description = description;
+                leaf.favicon = favicon;
+                leaf.image = image;
+            };
+
+            wc.on("did-navigate", sync);
+            wc.on("did-navigate-in-page", sync);
+            wc.on("page-title-updated", sync);
+            wc.once("destroyed", () => {
+                wc.removeListener("did-navigate", sync);
+                wc.removeListener("did-navigate-in-page", sync);
+                wc.removeListener("page-title-updated", sync);
+            });
+
+            wc.on(
+                "did-fail-load",
+                (_e, errorCode, errorDesc, validatedURL, isMainFrame) => {
+                    if (!isMainFrame) return;
+                    if (errorCode === -3) return;
+                    const html = error(validatedURL, errorCode, errorDesc);
+                    wc.loadURL(
+                        `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
+                        {
+                            baseURLForDataURL: validatedURL || "about:blank",
+                        }
+                    );
+                }
+            );
+
+            wc.on("before-input-event", (event, input) => {
+                if (input.type !== "keyDown") return;
+
+                const keybinds = {
+                    "meta+l": () => {
+                        event.preventDefault();
+                        pane.reverse();
+                    },
+                    f: () => {
+                        view.webContents.send("pane:biscuits");
+                    },
+                    j: () => {
+                        view.webContents.send("pane:scroll", { deltaY: 80 });
+                    },
+                    k: () => {
+                        view.webContents.send("pane:scroll", { deltaY: -80 });
+                    },
+                    g: () => {
+                        view.webContents.scrollToTop();
+                    },
+                    "shift+g": () => {
+                        view.webContents.scrollToBottom();
+                    },
+                    "shift+d": () => {
+                        view.webContents.send("pane:scroll", { deltaY: 320 });
+                    },
+                    "shift+u": () => {
+                        view.webContents.send("pane:scroll", { deltaY: -320 });
+                    },
+                    "shift+h": () => {
+                        this.onPanesNavigate(event, { id: leaf.id, dir: "left" });
+                    },
+                    "shift+l": () => {
+                        this.onPanesNavigate(event, { id: leaf.id, dir: "right" });
+                    },
+                    "shift+k": () => {
+                        this.onPanesNavigate(event, { id: leaf.id, dir: "up" });
+                    },
+                    "shift+j": () => {
+                        this.onPanesNavigate(event, { id: leaf.id, dir: "down" });
+                    },
+                    "meta+w": () => {
+                        event.preventDefault();
+                        this.close(leaf.id);
+
+                        if (!this.root) this.window?.close();
+                    },
+                    "meta+r": () => {
+                        event.preventDefault();
+                        view.webContents.reload();
+                    },
+                    "meta+shift+r": () => {
+                        event.preventDefault();
+                        view.webContents.reloadIgnoringCache();
+                    },
+                    "meta+[": () => {
+                        event.preventDefault();
+                        if (view.webContents.canGoBack()) view.webContents.goBack();
+                    },
+                    "meta+]": () => {
+                        event.preventDefault();
+                        if (view.webContents.canGoForward()) view.webContents.goForward();
+                    },
+                    "ctrl+h": () => {
+                        this.onPaneSplit(event, {
+                            id: leaf.id,
+                            dir: "vertical",
+                            side: "left",
+                        });
+                    },
+                    "ctrl+l": () => {
+                        this.onPaneSplit(event, {
+                            id: leaf.id,
+                            dir: "vertical",
+                            side: "right",
+                        });
+                    },
+                    "ctrl+k": () => {
+                        this.onPaneSplit(event, {
+                            id: leaf.id,
+                            dir: "horizontal",
+                            side: "up",
+                        });
+                    },
+                    "ctrl+j": () => {
+                        this.onPaneSplit(event, {
+                            id: leaf.id,
+                            dir: "horizontal",
+                            side: "down",
+                        });
+                    },
+                    "meta+shift+h": () => {
+                        this.onPaneResize(event, { id: leaf.id, dir: "left" });
+                    },
+                    "meta+shift+l": () => {
+                        this.onPaneResize(event, { id: leaf.id, dir: "right" });
+                    },
+                    "meta+shift+k": () => {
+                        this.onPaneResize(event, { id: leaf.id, dir: "up" });
+                    },
+                    "meta+shift+j": () => {
+                        this.onPaneResize(event, { id: leaf.id, dir: "down" });
+                    },
+                };
+
+                const buildKeybindString = (input: Electron.Input) => {
+                    const modifiers: string[] = [];
+                    if (input.meta) modifiers.push("meta");
+                    if (input.shift) modifiers.push("shift");
+                    if (input.alt) modifiers.push("alt");
+                    if (input.control) modifiers.push("control");
+
+                    const key = input.key?.toLowerCase();
+                    return modifiers.length > 0 ? `${modifiers.join("+")}+${key}` : key;
+                };
+
+                const keybindString = buildKeybindString(input);
+                const keybind = keybinds[keybindString];
+                if (keybind) {
+                    keybind();
+                    sendState(this.window, this.root, pane);
+                }
+
+                return;
+            });
+        }
+    };
 }

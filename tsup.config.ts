@@ -1,11 +1,10 @@
 import { defineConfig } from "tsup";
+import * as glob from 'glob'
+
+const entries = glob.sync('src/electron/**/*.ts')
 
 export default defineConfig({
-    entry: {
-        main: "src/electron/main.ts",
-        preload: "src/electron/preload.ts",
-        pane_preload: "src/electron/pane_preload.ts",
-    },
+    entry: entries,
     outDir: "dist-electron",
     format: ["cjs"],
     target: "node18",
@@ -15,5 +14,5 @@ export default defineConfig({
     clean: true,
     dts: false,
     treeshake: true,
-    external: ["electron"],            // <-- IMPORTANT
+    external: ["electron"],
 });
