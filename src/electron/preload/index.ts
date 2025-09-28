@@ -29,6 +29,13 @@ export const invoke = {
     ) => ipcRenderer.invoke("pane:split", { id, dir, side }) as Promise<void>,
     resizePane: (id: number, dir: "left" | "right" | "up" | "down") =>
         ipcRenderer.invoke("pane:resize", { id, dir }) as Promise<void>,
+    
+    searchInput: (paneId: number, query: string) =>
+        ipcRenderer.invoke("search:input", { paneId, query }) as Promise<void>,
+    searchSubmit: (paneId: number, query: string) =>
+        ipcRenderer.invoke("search:submit", { paneId, query }) as Promise<void>,
+    searchBlur: (paneId: number) =>
+        ipcRenderer.invoke("search:blur", { paneId }) as Promise<void>,
 
     onPanes: (cb: (state: PaneState[]) => void) => {
         const handler = (_e: IpcRendererEvent, state: PaneState[]) => cb(state);
@@ -44,6 +51,16 @@ export const invoke = {
         const handler = (_e: IpcRendererEvent, id: number) => cb(id);
         ipcRenderer.on("panes:active", handler);
         return () => ipcRenderer.removeListener("panes:active", handler);
+    },
+    onSearchUpdate: (cb: (data: { paneId: number; query: string }) => void) => {
+        const handler = (_e: IpcRendererEvent, data: { paneId: number; query: string }) => cb(data);
+        ipcRenderer.on("search:update", handler);
+        return () => ipcRenderer.removeListener("search:update", handler);
+    },
+    onSearchFocus: (cb: (data: { paneId: number; isFocused: boolean }) => void) => {
+        const handler = (_e: IpcRendererEvent, data: { paneId: number; isFocused: boolean }) => cb(data);
+        ipcRenderer.on("search:focus", handler);
+        return () => ipcRenderer.removeListener("search:focus", handler);
     },
 };
 

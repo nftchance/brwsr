@@ -44,11 +44,18 @@ export class Pane {
             }
             overlay.webContents.loadFile(distIndex);
         }
+        
+        // Send initial search state once overlay is loaded
+        overlay.webContents.once('did-finish-load', () => {
+            overlay.webContents.send("search:update", { paneId: leaf.id, query: leaf.url });
+        });
+        
         this.window.contentView.addChildView(overlay);
         overlay.setBounds(rect ?? { x: 0, y: 0, width: 1200, height: 600 });
+        overlay.webContents.openDevTools()
 
         this.window.contentView.addChildView(leaf.view);
-        /* leaf.view.webContents.openDevTools() */
+        leaf.view.webContents.openDevTools()
 
         this.leaf.layers = [overlay, leaf.view];
     }
@@ -65,7 +72,7 @@ export class Pane {
         layers[1].webContents.focus();
         layers[1].webContents.send(
             "pane:overlay:focus",
-            this.leaf.url === layers[0].webContents.getURL()
+            true
         );
     };
 

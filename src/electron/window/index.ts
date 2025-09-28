@@ -1,6 +1,6 @@
 import { BaseWindow, ipcMain, Menu, WebContentsView } from "electron";
 
-import { Leaf, Split, Node, Rect, PaneState } from "../pane/types";
+import { Leaf, Split, Node, Rect, PaneState, SearchState } from "../pane/types";
 import {
     sendState,
     replaceChild,
@@ -11,12 +11,16 @@ import {
 } from "../pane/layout";
 import { Pane } from "../pane/pane";
 import { allocId, contentSize, error } from "../pane/utils";
+import { isLikelyUrl, normalizeUrlSmart, buildGoogleSearchUrl } from "../utils/url";
 
 import * as path from "path";
 
 export class Window {
     paneById = new Map<number, Pane>();
     lastActivePaneId: number | null = null;
+    searchStates = new Map<number, SearchState>();
+    searchDebounceTimers = new Map<number, NodeJS.Timeout>();
+    overlayStates = new Map<number, boolean>(); // Track which panes have overlay open
 
     window: BaseWindow;
     root: Node | null = null;
@@ -53,6 +57,9 @@ export class Window {
         ipcMain.handle("pane:overlay", this.handlePaneOverlay);
         ipcMain.handle("pane:navigate", this.handlePaneNavigate);
         ipcMain.handle("pane:active", this.handlePaneActive);
+        ipcMain.handle("search:input", this.handleSearchInput);
+        ipcMain.handle("search:submit", this.handleSearchSubmit);
+        ipcMain.handle("search:blur", this.handleSearchBlur);
 
         ipcMain.on("panes:navigate", this.onPanesNavigate);
         ipcMain.on("pane:biscuits", this.onPaneBiscuits);
@@ -97,6 +104,13 @@ export class Window {
         const leaf: Leaf = { kind: "leaf", id, view, url };
         const pane = new Pane(this.window, leaf);
         this.paneById.set(id, pane);
+
+        this.searchStates.set(id, {
+            query: url,
+            paneId: id,
+            isFocused: false
+        });
+        this.overlayStates.set(id, false);
 
         this.subscribe(pane);
         await view.webContents.loadURL(url);
@@ -205,13 +219,22 @@ export class Window {
 
         if (!pane) return;
 
-        try {
-            this.window.contentView.removeChildView(pane.leaf.view);
-        } catch { }
-        try {
-            (pane.leaf.view as any)?.destroy?.();
-        } catch { }
+        // Close the pane which removes all layers (overlay + content)
+        pane.close();
+
+        // Destroy the views
+        for (const layer of pane.leaf.layers ?? []) {
+            try {
+                (layer as any)?.destroy?.();
+            } catch { }
+        }
         this.paneById.delete(id);
+        this.searchStates.delete(id);
+        this.overlayStates.delete(id);
+        if (this.searchDebounceTimers.has(id)) {
+            clearTimeout(this.searchDebounceTimers.get(id)!);
+            this.searchDebounceTimers.delete(id);
+        }
 
         if (this.root.kind === "leaf" && (this.root as any).id === id) {
             this.root = null;
@@ -445,6 +468,13 @@ export class Window {
                 leaf.description = description;
                 leaf.favicon = favicon;
                 leaf.image = image;
+
+                // Update search state with current URL
+                const searchState = this.searchStates.get(leaf.id);
+                if (searchState) {
+                    searchState.query = leaf.url;
+                    this.broadcastSearchUpdate(leaf.id, leaf.url);
+                }
             };
 
             wc.on("did-navigate", sync);
@@ -474,49 +504,30 @@ export class Window {
             wc.on("before-input-event", (event, input) => {
                 if (input.type !== "keyDown") return;
 
-                const keybinds = {
+                const overlay = this.overlayStates.get(leaf.id) || false;
+
+                const SCROLL_SIZE = 80;
+                const STEP_SIZE = 4;
+
+                const overlayKeys = {
+                    "control+v": () => view.webContents.send("pane:biscuits"),
+                    "g": () => view.webContents.scrollToTop(),
+                    "j": () => view.webContents.send("pane:scroll", { deltaY: SCROLL_SIZE }),
+                    "k": () => view.webContents.send("pane:scroll", { deltaY: -1 * SCROLL_SIZE }),
+                    "shift+g": () => view.webContents.scrollToBottom(),
+                    "shift+d": () => view.webContents.send("pane:scroll", { deltaY: SCROLL_SIZE * STEP_SIZE }),
+                    "shift+u": () => view.webContents.send("pane:scroll", { deltaY: -1 * SCROLL_SIZE * STEP_SIZE }),
+                    "control+h": () => this.onPanesNavigate(event, { id: leaf.id, dir: "left" }),
+                    "control+l": () => this.onPanesNavigate(event, { id: leaf.id, dir: "right" }),
+                    "control+k": () => this.onPanesNavigate(event, { id: leaf.id, dir: "up" }),
+                    "control+j": () => this.onPanesNavigate(event, { id: leaf.id, dir: "down" }),
+                }
+
+                const paneKeys = {
                     "meta+l": () => {
                         event.preventDefault();
                         pane.reverse();
-                    },
-                    f: () => {
-                        view.webContents.send("pane:biscuits");
-                    },
-                    j: () => {
-                        view.webContents.send("pane:scroll", { deltaY: 80 });
-                    },
-                    k: () => {
-                        view.webContents.send("pane:scroll", { deltaY: -80 });
-                    },
-                    g: () => {
-                        view.webContents.scrollToTop();
-                    },
-                    "shift+g": () => {
-                        view.webContents.scrollToBottom();
-                    },
-                    "shift+d": () => {
-                        view.webContents.send("pane:scroll", { deltaY: 320 });
-                    },
-                    "shift+u": () => {
-                        view.webContents.send("pane:scroll", { deltaY: -320 });
-                    },
-                    "shift+h": () => {
-                        this.onPanesNavigate(event, { id: leaf.id, dir: "left" });
-                    },
-                    "shift+l": () => {
-                        this.onPanesNavigate(event, { id: leaf.id, dir: "right" });
-                    },
-                    "shift+k": () => {
-                        this.onPanesNavigate(event, { id: leaf.id, dir: "up" });
-                    },
-                    "shift+j": () => {
-                        this.onPanesNavigate(event, { id: leaf.id, dir: "down" });
-                    },
-                    "meta+w": () => {
-                        event.preventDefault();
-                        this.close(leaf.id);
-
-                        if (!this.root) this.window?.close();
+                        this.overlayStates.set(leaf.id, !overlay);
                     },
                     "meta+r": () => {
                         event.preventDefault();
@@ -528,34 +539,43 @@ export class Window {
                     },
                     "meta+[": () => {
                         event.preventDefault();
-                        if (view.webContents.canGoBack()) view.webContents.goBack();
+                        if (!overlay && view.webContents.canGoBack()) view.webContents.goBack();
                     },
                     "meta+]": () => {
                         event.preventDefault();
-                        if (view.webContents.canGoForward()) view.webContents.goForward();
+                        if (!overlay && view.webContents.canGoForward()) view.webContents.goForward();
                     },
-                    "ctrl+h": () => {
+                }
+
+                const appKeys = {
+                    "meta+w": () => {
+                        event.preventDefault();
+                        this.close(leaf.id);
+
+                        if (!this.root) this.window?.close();
+                    },
+                    "shift+h": () => {
                         this.onPaneSplit(event, {
                             id: leaf.id,
                             dir: "vertical",
                             side: "left",
                         });
                     },
-                    "ctrl+l": () => {
+                    "shift+l": () => {
                         this.onPaneSplit(event, {
                             id: leaf.id,
                             dir: "vertical",
                             side: "right",
                         });
                     },
-                    "ctrl+k": () => {
+                    "shift+k": () => {
                         this.onPaneSplit(event, {
                             id: leaf.id,
                             dir: "horizontal",
                             side: "up",
                         });
                     },
-                    "ctrl+j": () => {
+                    "shift+j": () => {
                         this.onPaneSplit(event, {
                             id: leaf.id,
                             dir: "horizontal",
@@ -574,6 +594,12 @@ export class Window {
                     "meta+shift+j": () => {
                         this.onPaneResize(event, { id: leaf.id, dir: "down" });
                     },
+                }
+
+                const keybinds = {
+                    ...overlay === false ? overlayKeys : {},
+                    ...paneKeys,
+                    ...appKeys,
                 };
 
                 const buildKeybindString = (input: Electron.Input) => {
@@ -597,5 +623,91 @@ export class Window {
                 return;
             });
         }
+    };
+
+    handleSearchInput = async (_: Electron.IpcMainInvokeEvent, { paneId, query }: { paneId: number; query: string }) => {
+        const searchState: SearchState = {
+            query,
+            paneId,
+            isFocused: true
+        };
+        this.searchStates.set(paneId, searchState);
+
+        if (this.searchDebounceTimers.has(paneId)) {
+            clearTimeout(this.searchDebounceTimers.get(paneId)!);
+        }
+
+        this.broadcastSearchUpdate(paneId, query);
+
+        const timer = setTimeout(() => {
+            this.processSearchDebounced(paneId, query);
+        }, 450);
+        this.searchDebounceTimers.set(paneId, timer);
+    };
+
+    handleSearchSubmit = async (_: Electron.IpcMainInvokeEvent, { paneId, query }: { paneId: number; query: string }) => {
+        if (this.searchDebounceTimers.has(paneId)) {
+            clearTimeout(this.searchDebounceTimers.get(paneId)!);
+            this.searchDebounceTimers.delete(paneId);
+        }
+
+        const trimmedQuery = query.trim();
+        if (!trimmedQuery) return;
+
+        let url: string;
+        if (isLikelyUrl(trimmedQuery)) {
+            url = normalizeUrlSmart(trimmedQuery);
+        } else {
+            url = buildGoogleSearchUrl(trimmedQuery);
+        }
+
+        const pane = this.paneById.get(paneId);
+        if (pane) {
+            pane.leaf.view.webContents.loadURL(url);
+            this.broadcastSearchUpdate(paneId, url);
+        }
+
+        const searchState = this.searchStates.get(paneId);
+        if (searchState) {
+            searchState.isFocused = false;
+            this.broadcastSearchFocus(paneId, false);
+        }
+    };
+
+    handleSearchBlur = async (_: Electron.IpcMainInvokeEvent, { paneId }: { paneId: number }) => {
+        const searchState = this.searchStates.get(paneId);
+        if (searchState) {
+            searchState.isFocused = false;
+            this.broadcastSearchFocus(paneId, false);
+        }
+    };
+
+    private processSearchDebounced = (paneId: number, query: string) => {
+        const trimmedQuery = query.trim();
+        if (!trimmedQuery || /\s/.test(trimmedQuery)) return;
+
+        if (isLikelyUrl(trimmedQuery)) {
+            const url = normalizeUrlSmart(trimmedQuery);
+            const pane = this.paneById.get(paneId);
+            if (pane) {
+                pane.leaf.view.webContents.loadURL(url);
+            }
+        }
+    };
+
+    private broadcastSearchUpdate = (paneId: number, query: string) => {
+        this.paneById.forEach(pane => {
+            pane.leaf.layers?.forEach(layer => {
+                layer.webContents.send("search:update", { paneId, query });
+            });
+        });
+    };
+
+    private broadcastSearchFocus = (paneId: number, isFocused: boolean) => {
+        this.paneById.forEach(pane => {
+            pane.leaf.layers?.forEach(layer => {
+                layer.webContents.send("search:focus", { paneId, isFocused });
+            });
+        });
     };
 }

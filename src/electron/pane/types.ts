@@ -38,3 +38,9 @@ export type PaneState = {
   textColor?: string;
   image?: string;
 };
+
+export type SearchState = {
+  query: string;
+  paneId: number;
+  isFocused: boolean;
+};

@@ -7,11 +7,9 @@ import React, {
 } from "react";
 
 import { PaneState } from "../electron/pane/types";
-import { isLikelyUrl, normalizeUrlSmart } from "./utils/url";
 
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const tRef = useRef<number | null>(null);
 
   const [search, setSearch] = useState("");
   const [panes, setPanes] = useState<PaneState[]>([]);
@@ -23,21 +21,11 @@ export default function App() {
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
-      const s = search.trim();
-      if (!s) return;
-      if (isLikelyUrl(s)) {
-        const url = normalizeUrlSmart(s);
-        window.native.navigatePane(currentPaneId, url);
-        setSearch(url);
-      } else {
-        window.native.navigatePane(
-          currentPaneId,
-          `https://www.google.com/search?q=${encodeURIComponent(s)}`
-        );
-      }
+      window.native.searchSubmit(currentPaneId, search);
       (e.currentTarget as HTMLInputElement).blur();
     } else if (e.key === "Escape") {
       e.preventDefault();
+      window.native.searchBlur(currentPaneId);
       (e.currentTarget as HTMLInputElement).blur();
     }
   };
@@ -60,34 +48,42 @@ export default function App() {
         inputRef.current.blur();
       }
     });
+    
+    const onSearchUpdate = window.native.onSearchUpdate(({ paneId, query }) => {
+      if (paneId === currentPaneId) {
+        setSearch(query);
+      }
+    });
+    
+    const onSearchFocus = window.native.onSearchFocus(({ paneId, isFocused }) => {
+      if (paneId === currentPaneId && inputRef.current) {
+        if (isFocused) {
+          inputRef.current.focus();
+          inputRef.current.select();
+        } else {
+          inputRef.current.blur();
+        }
+      }
+    });
 
     fetchPanes();
 
     return () => {
       onPanes();
       onOverlayFocus();
+      onSearchUpdate();
+      onSearchFocus();
     };
-  }, []);
+  }, [currentPaneId]);
 
   useEffect(() => {
     setSearch(currentPane?.url || "");
   }, [currentPane?.url]);
 
-  useEffect(() => {
-    if (tRef.current) window.clearTimeout(tRef.current);
-    tRef.current = window.setTimeout(() => {
-      const s = search.trim();
-      if (!s || /\s/.test(s)) return;
-      if (isLikelyUrl(s)) {
-        const url = normalizeUrlSmart(s);
-        window.native.navigatePane(currentPaneId, url);
-      }
-    }, 450);
-
-    return () => {
-      if (tRef.current) window.clearTimeout(tRef.current);
-    };
-  }, [search]);
+  const handleSearchChange = useCallback((value: string) => {
+    setSearch(value);
+    window.native.searchInput(currentPaneId, value);
+  }, [currentPaneId]);
 
   return (
     <div className="w-full h-full flex items-center justify-center text-white">
@@ -111,7 +107,7 @@ export default function App() {
           <input
             ref={inputRef}
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => handleSearchChange(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Type a URL or search…"
             className="bg-transparent text-inherit text-xs w-full outline-none"
