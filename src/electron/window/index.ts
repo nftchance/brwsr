@@ -475,6 +475,9 @@ export class Window {
                     searchState.query = leaf.url;
                     this.broadcastSearchUpdate(leaf.id, leaf.url);
                 }
+                
+                // Broadcast updated pane state to all overlays
+                sendState(this.window, this.root, pane);
             };
 
             wc.on("did-navigate", sync);
@@ -665,6 +668,10 @@ export class Window {
         if (pane) {
             pane.leaf.view.webContents.loadURL(url);
             this.broadcastSearchUpdate(paneId, url);
+            
+            // Close the overlay after navigation
+            pane.reverse();
+            this.overlayStates.set(paneId, false);
         }
 
         const searchState = this.searchStates.get(paneId);

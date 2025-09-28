@@ -5,3 +5,24 @@ body,
 #root {
   height: 100%;
 }
+
+/* Search overlay animations */
+.search-overlay {
+  animation: slideUp 0.2s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Smooth transitions for color changes */
+.search-container {
+  transition: background-color 0.3s ease, color 0.3s ease;
+}

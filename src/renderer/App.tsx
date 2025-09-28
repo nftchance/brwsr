@@ -7,6 +7,7 @@ import React, {
 } from "react";
 
 import { PaneState } from "../electron/pane/types";
+import { getOverlayStyles } from "./utils/colors";
 
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -32,22 +33,16 @@ export default function App() {
 
   useEffect(() => {
     const fetchPanes = async () => {
-      setPanes(await window.native.listPanes());
+      const panesList = await window.native.listPanes();
+      setPanes(panesList);
+      // Initialize search with current pane's URL
+      const currentPaneData = panesList.find(p => p.id === currentPaneId);
+      if (currentPaneData?.url) {
+        setSearch(currentPaneData.url);
+      }
     };
 
     const onPanes = window.native.onPanes((panes) => setPanes(panes));
-    const onOverlayFocus = window.native.onOverlayFocus((focused) => {
-      if (!inputRef.current) return;
-
-      if (focused) {
-        setSearch(currentPane?.url || "");
-
-        inputRef.current.focus();
-        inputRef.current.select();
-      } else {
-        inputRef.current.blur();
-      }
-    });
     
     const onSearchUpdate = window.native.onSearchUpdate(({ paneId, query }) => {
       if (paneId === currentPaneId) {
@@ -70,7 +65,6 @@ export default function App() {
 
     return () => {
       onPanes();
-      onOverlayFocus();
       onSearchUpdate();
       onSearchFocus();
     };
@@ -78,6 +72,36 @@ export default function App() {
 
   useEffect(() => {
     setSearch(currentPane?.url || "");
+    // Reset favicon error when pane changes
+    setFaviconError(false);
+  }, [currentPane?.url]);
+
+  // Handle overlay focus/blur events
+  useEffect(() => {
+    const onOverlayFocus = window.native.onOverlayFocus((focused) => {
+      if (!inputRef.current) return;
+
+      if (focused) {
+        // Set the current URL when overlay opens
+        if (currentPane?.url) {
+          setSearch(currentPane.url);
+        }
+
+        // Focus and select all text after a brief delay to ensure value is set
+        setTimeout(() => {
+          if (inputRef.current) {
+            inputRef.current.focus();
+            inputRef.current.select();
+          }
+        }, 10);
+      } else {
+        inputRef.current.blur();
+      }
+    });
+
+    return () => {
+      onOverlayFocus();
+    };
   }, [currentPane?.url]);
 
   const handleSearchChange = useCallback((value: string) => {
@@ -85,14 +109,13 @@ export default function App() {
     window.native.searchInput(currentPaneId, value);
   }, [currentPaneId]);
 
+  const overlayStyles = getOverlayStyles(currentPane);
+
   return (
-    <div className="w-full h-full flex items-center justify-center text-white">
+    <div className="w-full h-full flex items-center justify-center">
       <div
-        className="mt-auto w-full flex flex-col gap-4 border-t-3 border-black relative"
-        style={{
-          backgroundColor: currentPane?.backgroundColor,
-          color: "#000000",
-        }}
+        className="mt-auto w-full flex flex-col gap-4 relative shadow-2xl search-overlay search-container"
+        style={overlayStyles}
       >
         {/* <div
           className="bg-[#000000] w-92 h-48"
@@ -103,31 +126,35 @@ export default function App() {
           }}
         /> */}
 
-        <div className="flex flex-row items-center justify-between gap-8 p-3">
+        <div 
+          className="flex flex-row items-center justify-between gap-8 p-4"
+          style={{
+            borderTop: `1px solid ${overlayStyles.color}20`, // 20 is ~12% opacity in hex
+          }}
+        >
           <input
             ref={inputRef}
             value={search}
             onChange={(e) => handleSearchChange(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Type a URL or search…"
-            className="bg-transparent text-inherit text-xs w-full outline-none"
+            className="bg-transparent text-inherit text-sm w-full outline-none placeholder-current placeholder-opacity-50"
             spellCheck={false}
           />
 
-          <h1 className="text-xs flex flex-row items-center gap-2 pr-2">
-            <img
-              src={currentPane?.favicon}
-              alt="favicon"
-              className="w-4 h-4"
-              onError={() => setFaviconError(true)}
-              style={{
-                display: faviconError ? "none" : "block",
-              }}
-            />
-            <span className="whitespace-nowrap max-w-[10%]">
+          <div className="text-xs flex flex-row items-center gap-2 opacity-60">
+            {currentPane?.favicon && !faviconError && (
+              <img
+                src={currentPane.favicon}
+                alt=""
+                className="w-4 h-4"
+                onError={() => setFaviconError(true)}
+              />
+            )}
+            <span className="whitespace-nowrap overflow-hidden text-ellipsis max-w-[200px]">
               {currentPane?.title}
             </span>
-          </h1>
+          </div>
         </div>
       </div>
     </div>
