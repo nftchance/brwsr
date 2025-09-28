@@ -10,6 +10,7 @@ let cleanup: null | (() => void) = null;
 let mutationObs: MutationObserver | null = null;
 let scrollHandler: any = null;
 let cursor = 0;
+let selectionTimeout: NodeJS.Timeout | null = null;
 
 export const getTargets = (): Target[] => {
     const clickable = [
@@ -145,23 +146,23 @@ export const redrawPositions = () => {
     }
 };
 
-export const activate = (hintsActive: boolean) => {
-    if (hintsActive) return;
+export const activate = () => {
+    if (overlay) return;
 
-    hintsActive = true;
     typed = '';
     cursor = 0;
     const targets = getTargets();
     overlay = makeOverlay(targets);
     redrawPositions();
+    updateDisplay();
 
     scrollHandler = () => redrawPositions();
     window.addEventListener('scroll', scrollHandler, { passive: true });
     window.addEventListener('resize', scrollHandler);
 
     mutationObs = new MutationObserver(() => {
-        deactivate(hintsActive);
-        activate(hintsActive);
+        deactivate();
+        activate();
     });
     mutationObs.observe(document.documentElement, { childList: true, subtree: true });
 
@@ -174,11 +175,83 @@ export const activate = (hintsActive: boolean) => {
     };
 };
 
-export const deactivate = (hintsActive: boolean) => {
-    hintsActive = false;
+export const deactivate = () => {
     typed = '';
     cursor = 0;
+    if (selectionTimeout) {
+        clearTimeout(selectionTimeout);
+        selectionTimeout = null;
+    }
     cleanup?.();
     cleanup = null;
+};
+
+export const updateTyped = (newTyped: string) => {
+    typed = newTyped;
+    updateDisplay();
+    checkSelection();
+};
+
+export const updateDisplay = () => {
+    if (!overlay) return;
+    
+    // Update query display
+    overlay.queryNode.textContent = typed || '';
+    
+    // Update hint visibility and styling
+    for (const [label, item] of Object.entries(overlay.map)) {
+        const isMatch = typed === '' || label.startsWith(typed);
+        const isExact = label === typed;
+        
+        item.node.classList.toggle('hidden', !isMatch);
+        item.node.classList.toggle('typed-ok', isMatch && typed !== '');
+        item.node.classList.toggle('active', isExact);
+    }
+};
+
+export const checkSelection = () => {
+    if (!overlay || !typed) return;
+    
+    // Clear any existing timeout
+    if (selectionTimeout) {
+        clearTimeout(selectionTimeout);
+        selectionTimeout = null;
+    }
+    
+    // Check if typed exactly matches a label
+    const exactMatch = overlay.map[typed];
+    if (!exactMatch) return;
+    
+    // Check if there are any labels that start with our typed string but are longer
+    const longerMatches = Object.keys(overlay.map).filter(
+        label => label.startsWith(typed) && label.length > typed.length
+    );
+    
+    if (longerMatches.length > 0) {
+        // Wait a bit to see if user will type more characters
+        selectionTimeout = setTimeout(() => {
+            performSelection(exactMatch);
+        }, 300); // 300ms delay
+    } else {
+        // No ambiguity, select immediately
+        performSelection(exactMatch);
+    }
+};
+
+const performSelection = (match: any) => {
+    // Notify main process that biscuits are being deactivated
+    ipcRenderer.send('pane:biscuits:completed');
+    
+    // For links, navigate directly instead of clicking
+    // This ensures we always navigate in the same pane
+    if (match.href && match.tag === 'a') {
+        window.location.href = match.href;
+    } else {
+        // For other elements, simulate a click
+        const el = match.el as HTMLElement;
+        el.click();
+    }
+    
+    deactivate();
 };
 

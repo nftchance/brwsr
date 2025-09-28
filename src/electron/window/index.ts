@@ -21,6 +21,7 @@ export class Window {
     searchStates = new Map<number, SearchState>();
     searchDebounceTimers = new Map<number, NodeJS.Timeout>();
     overlayStates = new Map<number, boolean>(); // Track which panes have overlay open
+    biscuitStates = new Map<number, { active: boolean; typed: string }>(); // Track biscuit mode per pane
 
     window: BaseWindow;
     root: Node | null = null;
@@ -67,6 +68,7 @@ export class Window {
         ipcMain.on("pane:close", this.onPaneClose);
         ipcMain.on("pane:split", this.onPaneSplit);
         ipcMain.on("pane:resize", this.onPaneResize);
+        ipcMain.on("pane:biscuits:completed", this.onBiscuitsCompleted);
     };
 
     create = async (url: string) => {
@@ -111,6 +113,7 @@ export class Window {
             isFocused: false
         });
         this.overlayStates.set(id, false);
+        this.biscuitStates.set(id, { active: false, typed: "" });
 
         this.subscribe(pane);
         await view.webContents.loadURL(url);
@@ -153,7 +156,7 @@ export class Window {
         const target = child.leaf;
 
         const parent = findParent(this.root, id);
-        const pane = await this.make(url || "https://example.com");
+        const pane = await this.make(url || "https://perplexity.com");
         const other = pane.leaf;
 
         let node: Split;
@@ -231,6 +234,7 @@ export class Window {
         this.paneById.delete(id);
         this.searchStates.delete(id);
         this.overlayStates.delete(id);
+        this.biscuitStates.delete(id);
         if (this.searchDebounceTimers.has(id)) {
             clearTimeout(this.searchDebounceTimers.get(id)!);
             this.searchDebounceTimers.delete(id);
@@ -344,7 +348,7 @@ export class Window {
     };
 
     handlePanesCreate = (_: unknown, payload: { url: string; rect: Rect }) =>
-        this.create(payload.url || "https://example.com");
+        this.create(payload.url || "https://perplexity.com");
 
     handlePanesList = () => {
         const out: PaneState[] = [];
@@ -488,6 +492,19 @@ export class Window {
                 wc.removeListener("did-navigate-in-page", sync);
                 wc.removeListener("page-title-updated", sync);
             });
+            
+            // Intercept all new window attempts and navigate in the same pane
+            wc.setWindowOpenHandler((details) => {
+                // Navigate in the current pane instead of opening new window
+                wc.loadURL(details.url);
+                return { action: 'deny' };
+            });
+            
+            // Also handle window.open() calls that might bypass the handler
+            wc.on('new-window', (event, url) => {
+                event.preventDefault();
+                wc.loadURL(url);
+            });
 
             wc.on(
                 "did-fail-load",
@@ -508,12 +525,71 @@ export class Window {
                 if (input.type !== "keyDown") return;
 
                 const overlay = this.overlayStates.get(leaf.id) || false;
+                const biscuitState = this.biscuitStates.get(leaf.id);
+                const biscuitsActive = biscuitState?.active || false;
+
+                // Handle biscuit mode input
+                if (biscuitsActive && input.key) {
+                    const key = input.key.toLowerCase();
+                    
+                    // Escape cancels biscuit mode
+                    if (key === 'escape') {
+                        biscuitState.active = false;
+                        biscuitState.typed = "";
+                        view.webContents.send("pane:biscuits:deactivate");
+                        return;
+                    }
+                    
+                    // Check if it's a valid hint character
+                    const HINT_CHARS = 'asdfghjklqwertuiopzxcvbnm';
+                    if (HINT_CHARS.includes(key) && !input.control && !input.meta && !input.alt) {
+                        biscuitState.typed += key;
+                        view.webContents.send("pane:biscuits:update", { typed: biscuitState.typed });
+                        return;
+                    }
+                    
+                    // Backspace removes last character
+                    if (key === 'backspace' && biscuitState.typed.length > 0) {
+                        biscuitState.typed = biscuitState.typed.slice(0, -1);
+                        view.webContents.send("pane:biscuits:update", { typed: biscuitState.typed });
+                        return;
+                    }
+                    
+                    // Any other key cancels biscuit mode
+                    biscuitState.active = false;
+                    biscuitState.typed = "";
+                    view.webContents.send("pane:biscuits:deactivate");
+                    // Don't return here - let the key fall through to normal handling
+                }
 
                 const SCROLL_SIZE = 80;
                 const STEP_SIZE = 4;
 
                 const overlayKeys = {
-                    "control+v": () => view.webContents.send("pane:biscuits"),
+                    "escape": () => {
+                        // Unfocus any active element in the page
+                        view.webContents.executeJavaScript(`
+                            (() => {
+                                const activeEl = document.activeElement;
+                                if (activeEl && activeEl !== document.body) {
+                                    activeEl.blur();
+                                }
+                                // Also clear any text selection
+                                window.getSelection().removeAllRanges();
+                            })()
+                        `);
+                    },
+                    "control+v": () => {
+                        const biscuitState = this.biscuitStates.get(leaf.id);
+                        if (biscuitState && !biscuitState.active) {
+                            // Don't activate biscuits if overlay is open
+                            if (!overlay) {
+                                biscuitState.active = true;
+                                biscuitState.typed = "";
+                                view.webContents.send("pane:biscuits:activate");
+                            }
+                        }
+                    },
                     "g": () => view.webContents.scrollToTop(),
                     "j": () => view.webContents.send("pane:scroll", { deltaY: SCROLL_SIZE }),
                     "k": () => view.webContents.send("pane:scroll", { deltaY: -1 * SCROLL_SIZE }),
@@ -529,6 +605,12 @@ export class Window {
                 const paneKeys = {
                     "meta+l": () => {
                         event.preventDefault();
+                        // Disable biscuits when opening overlay
+                        if (biscuitsActive) {
+                            biscuitState!.active = false;
+                            biscuitState!.typed = "";
+                            view.webContents.send("pane:biscuits:deactivate");
+                        }
                         pane.reverse();
                         this.overlayStates.set(leaf.id, !overlay);
                     },
@@ -619,6 +701,7 @@ export class Window {
                 const keybindString = buildKeybindString(input);
                 const keybind = keybinds[keybindString];
                 if (keybind) {
+                    event.preventDefault();
                     keybind();
                     sendState(this.window, this.root, pane);
                 }
@@ -716,5 +799,23 @@ export class Window {
                 layer.webContents.send("search:focus", { paneId, isFocused });
             });
         });
+    };
+
+    onBiscuitsCompleted = (_: Electron.IpcMainEvent, data: any) => {
+        // Find the pane ID from the webContents that sent this event
+        let paneId: number | null = null;
+        this.paneById.forEach((pane, id) => {
+            if (pane.leaf.view.webContents === _.sender) {
+                paneId = id;
+            }
+        });
+        
+        if (paneId !== null) {
+            const biscuitState = this.biscuitStates.get(paneId);
+            if (biscuitState) {
+                biscuitState.active = false;
+                biscuitState.typed = "";
+            }
+        }
     };
 }

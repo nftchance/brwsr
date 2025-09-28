@@ -1,7 +1,7 @@
 import { ipcRenderer } from "electron";
 
 import * as preload from "./index";
-import { activate, deactivate } from "./biscuits";
+import { activate, deactivate, updateTyped } from "./biscuits";
 
 function deepestActiveElement(root: Document | ShadowRoot): Element | null {
     let ae: any = root.activeElement;
@@ -57,13 +57,16 @@ ipcRenderer.on("pane:scroll", (_e, payload: { deltaY: number }) => {
     window.scrollBy(0, dy);
 });
 
-let hintsActive = false;
+// Biscuit mode handlers
+ipcRenderer.on("pane:biscuits:activate", (_e) => {
+    activate();
+});
 
-ipcRenderer.on("pane:biscuits", (_e) => {
-    if (hintsActive)
-        deactivate(hintsActive);
-    else activate(hintsActive);
-    hintsActive = !hintsActive;
-    console.log("hintsActive", hintsActive)
+ipcRenderer.on("pane:biscuits:deactivate", (_e) => {
+    deactivate();
+});
+
+ipcRenderer.on("pane:biscuits:update", (_e, data: { typed: string }) => {
+    updateTyped(data.typed);
 });
 
