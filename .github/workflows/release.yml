@@ -1,0 +1,145 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 10
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - uses: actions/cache@v3
+        name: Setup pnpm cache
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build app
+        run: pnpm run build
+
+      # macOS specific steps
+      - name: Import macOS certificates
+        if: matrix.os == 'macos-latest' && env.APPLE_CERTIFICATE_BASE64 != ''
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          echo $APPLE_CERTIFICATE_BASE64 | base64 --decode > certificate.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security import certificate.p12 -k build.keychain -P $APPLE_CERTIFICATE_PASSWORD -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
+
+      - name: Build distributables
+        env:
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm run make
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.os }}-distributables
+          path: out/make/**/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Where Browser ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Assets
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: context.ref.replace('refs/tags/', '')
+            });
+            
+            const artifactDirs = ['macos-latest-distributables', 'ubuntu-latest-distributables', 'windows-latest-distributables'];
+            
+            for (const dir of artifactDirs) {
+              const artifactPath = path.join('artifacts', dir);
+              if (!fs.existsSync(artifactPath)) continue;
+              
+              const files = fs.readdirSync(artifactPath, { recursive: true })
+                .filter(file => {
+                  const fullPath = path.join(artifactPath, file);
+                  return fs.statSync(fullPath).isFile();
+                });
+              
+              for (const file of files) {
+                const filePath = path.join(artifactPath, file);
+                const fileName = path.basename(file);
+                
+                console.log(`Uploading ${fileName}...`);
+                
+                await github.rest.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release.data.id,
+                  name: fileName,
+                  data: fs.readFileSync(filePath)
+                });
+              }
+            }

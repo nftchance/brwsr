@@ -1,0 +1,25 @@
+appId: com.where.browser
+productName: Where
+directories:
+  output: out/make
+files:
+  - "dist/**/*"
+  - "dist-electron/**/*"
+  - "assets/**/*"
+  - "!**/*.ts"
+  - "!src/**/*"
+  - "!node_modules/**/*"
+  - "node_modules/electron-updater/**/*"
+mac:
+  category: public.app-category.productivity
+  icon: assets/icon.icns
+win:
+  icon: assets/icon.ico
+linux:
+  icon: assets/icon.png
+  category: Network;WebBrowser
+publish:
+  provider: github
+  owner: yourusername
+  repo: where-browser
+  releaseType: release

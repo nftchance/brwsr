@@ -13,6 +13,7 @@ import {
 import { Pane } from "../pane/pane";
 import { allocId, contentSize, error } from "../pane/utils";
 import { isLikelyUrl, normalizeUrlSmart, buildGoogleSearchUrl } from "../utils/url";
+import { setupAutoUpdater, checkForUpdates } from "../updater";
 
 import * as path from "path";
 
@@ -99,6 +100,11 @@ export class Window {
         ipcMain.on("pane:split", this.onPaneSplit);
         ipcMain.on("pane:resize", this.onPaneResize);
         ipcMain.on("pane:biscuits:completed", this.onBiscuitsCompleted);
+
+        // Set up auto-updater
+        setupAutoUpdater(this.window);
+        // Check for updates 30 seconds after startup
+        setTimeout(() => checkForUpdates(), 30000);
 
         // Load saved state or create default
         const savedState = loadPaneState();

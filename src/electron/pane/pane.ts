@@ -52,10 +52,10 @@ export class Pane {
         
         this.window.contentView.addChildView(overlay);
         overlay.setBounds(rect ?? { x: 0, y: 0, width: 1200, height: 600 });
-        overlay.webContents.openDevTools()
+        /* overlay.webContents.openDevTools() */
 
         this.window.contentView.addChildView(leaf.view);
-        leaf.view.webContents.openDevTools()
+        /* leaf.view.webContents.openDevTools() */
 
         this.leaf.layers = [overlay, leaf.view];
     }

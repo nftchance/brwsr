@@ -13,7 +13,19 @@ module.exports = {
             ProductName: 'Where',
             InternalName: 'Where'
         },
-        osxSign: false,
+        osxSign: process.env.APPLE_IDENTITY ? {
+            identity: process.env.APPLE_IDENTITY,
+            'hardened-runtime': true,
+            'gatekeeper-assess': false,
+            entitlements: 'entitlements.plist',
+            'entitlements-inherit': 'entitlements.plist',
+            'signature-flags': 'library'
+        } : false,
+        osxNotarize: process.env.APPLE_ID && process.env.APPLE_ID_PASSWORD ? {
+            appleId: process.env.APPLE_ID,
+            appleIdPassword: process.env.APPLE_ID_PASSWORD,
+            teamId: process.env.APPLE_TEAM_ID
+        } : undefined,
         icon: 'assets/icon',
         buildVersion: '1.0.0'
     },
