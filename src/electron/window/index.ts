@@ -80,23 +80,7 @@ export class Window {
     }
 
     init = async () => {
-        // Load saved state or create default
-        const savedState = loadPaneState();
-
-        if (savedState && savedState.root) {
-            // Restore saved pane layout
-            await this.restoreFromSavedState(savedState.root);
-            this.lastActivePaneId = savedState.lastActivePaneId;
-
-            // Restore window bounds if available
-            if (savedState.windowBounds) {
-                this.window.setBounds(savedState.windowBounds);
-            }
-        } else {
-            // First time user - create default pane
-            await this.create("https://staging.onplug.io");
-        }
-
+        // Register handlers first before creating any panes
         ipcMain.handle("panes:create", this.handlePanesCreate);
         ipcMain.handle("panes:list", this.handlePanesList);
         ipcMain.handle("pane:get", this.handlePaneGet);
@@ -114,6 +98,31 @@ export class Window {
         ipcMain.on("pane:close", this.onPaneClose);
         ipcMain.on("pane:split", this.onPaneSplit);
         ipcMain.on("pane:resize", this.onPaneResize);
+        ipcMain.on("pane:biscuits:completed", this.onBiscuitsCompleted);
+
+        // Load saved state or create default
+        const savedState = loadPaneState();
+
+        if (savedState && savedState.root) {
+            // Restore saved pane layout
+            await this.restoreFromSavedState(savedState.root);
+
+            // Only set lastActivePaneId if it exists in the restored panes
+            if (savedState.lastActivePaneId && this.paneById.has(savedState.lastActivePaneId)) {
+                this.lastActivePaneId = savedState.lastActivePaneId;
+            } else {
+                // Default to first pane if saved active pane doesn't exist
+                this.lastActivePaneId = this.paneById.keys().next().value || null;
+            }
+
+            // Restore window bounds if available
+            if (savedState.windowBounds) {
+                this.window.setBounds(savedState.windowBounds);
+            }
+        } else {
+            // First time user - create default pane
+            await this.create("https://staging.onplug.io");
+        }
     };
 
     create = async (url: string) => {
@@ -133,10 +142,10 @@ export class Window {
         return this.split(last.id, "vertical", "right", url);
     };
 
-    make = async (url: string): Promise<Pane> => {
+    make = async (url: string, providedId?: number): Promise<Pane> => {
         if (!this.window) throw new Error("No window to attach pane to");
 
-        const id = allocId();
+        const id = providedId || allocId();
 
         const view = new WebContentsView({
             webPreferences: {
@@ -299,7 +308,7 @@ export class Window {
         }
         this.root = replaceNode(this.root, id);
         sendState(this.window, this.root, null);
-        
+
         // Only save if we still have panes
         if (this.root) {
             this.debouncedSave();
@@ -502,26 +511,29 @@ export class Window {
         this.debouncedSave();
     };
 
+    onBiscuitsCompleted = (
+        _: unknown,
+        { paneId }: { paneId: number }
+    ) => {
+        const biscuitState = this.biscuitStates.get(paneId);
+        if (biscuitState) {
+            biscuitState.active = false;
+            biscuitState.typed = "";
+        }
+        // Make sure to send deactivate to clean up any remaining state
+        const pane = this.paneById.get(paneId);
+        if (pane) {
+            try {
+                pane.leaf.view.webContents.send("pane:biscuits:deactivate");
+            } catch { }
+        }
+    };
+
     subscribe = (pane: Pane) => {
         const leaf = pane.leaf;
 
         for (const view of leaf.layers ?? []) {
             const wc = view.webContents;
-
-            // Handle biscuits completion from webview
-            wc.on('ipc-message', (event, channel) => {
-                if (channel === 'pane:biscuits:completed') {
-                    const biscuitState = this.biscuitStates.get(leaf.id);
-                    if (biscuitState) {
-                        biscuitState.active = false;
-                        biscuitState.typed = "";
-                    }
-                    // Make sure to send deactivate to clean up any remaining state
-                    try {
-                        leaf.view.webContents.send("pane:biscuits:deactivate");
-                    } catch { }
-                }
-            });
 
             const sync = async () => {
                 if (leaf.view.webContents.getURL() !== view.webContents.getURL()) {
@@ -706,7 +718,6 @@ export class Window {
                     "f": () => {
                         const biscuitState = this.biscuitStates.get(leaf.id);
                         if (biscuitState) {
-                            // Toggle biscuits (but don't activate if overlay is open)
                             if (biscuitState.active) {
                                 biscuitState.active = false;
                                 biscuitState.typed = "";
@@ -761,7 +772,6 @@ export class Window {
                 const paneKeys = {
                     "meta+l": () => {
                         event.preventDefault();
-                        // Disable biscuits when opening overlay
                         if (biscuitsActive) {
                             biscuitState!.active = false;
                             biscuitState!.typed = "";
@@ -809,17 +819,13 @@ export class Window {
                     },
                 }
 
-                // Special handling for Escape key
                 if (input.key?.toLowerCase() === 'escape' && !overlay) {
-                    // Only handle escape when typing OR biscuits active
                     if (biscuitsActive) {
-                        // Already handled in biscuit mode section above
                         return;
                     }
 
                     if (isTyping) {
                         event.preventDefault();
-                        // Unfocus any active element
                         leaf.view.webContents.executeJavaScript(`
                             (() => {
                                 const activeEl = document.activeElement;
@@ -830,33 +836,26 @@ export class Window {
                             })()
                         `);
                     }
-                    // If not typing, let escape through for website use
                     return;
                 }
 
-                // Check all available keybinds first
                 const allKeybinds = {
                     ...(overlay === false && !biscuitsActive) ? overlayKeys : {},
                     ...paneKeys,
                     ...appKeys,
                 };
 
-                // If we have a keybind for this key combo, check if we need to verify typing context
                 const keybind = allKeybinds[keybindString];
                 if (keybind) {
-                    // For modifier-less keys, check typing context
                     const isTypingKey = !input.meta && !input.control && !input.alt;
 
                     if (isTypingKey && !overlay && !biscuitsActive) {
-                        // For single keys, check if user is typing
-                        if (!isTyping) {
-                            event.preventDefault();
-                            keybind();
-                            sendState(this.window, this.root, pane);
-                        }
-                        // If typing, let the key through to the page
+                        if (isTyping === true) return
+
+                        event.preventDefault();
+                        keybind();
+                        sendState(this.window, this.root, pane);
                     } else {
-                        // Keys with modifiers can be handled immediately
                         event.preventDefault();
                         keybind();
                         sendState(this.window, this.root, pane);
@@ -907,11 +906,9 @@ export class Window {
 
         const pane = this.paneById.get(paneId);
         if (pane) {
-            // Use JavaScript navigation to preserve history
             pane.leaf.view.webContents.executeJavaScript(`window.location.assign('${url.replace(/'/g, "\\'")}')`);
             this.broadcastSearchUpdate(paneId, url);
 
-            // Close the overlay after navigation
             pane.reverse();
             this.overlayStates.set(paneId, false);
         }
@@ -968,7 +965,7 @@ export class Window {
     private saveState = () => {
         // Only save if we have actual panes
         if (!this.root) return;
-        
+
         const bounds = this.window.getBounds();
         savePaneState({
             root: serializeNode(this.root),
@@ -988,13 +985,15 @@ export class Window {
 
     private restoreFromSavedState = async (savedRoot: SerializedNode) => {
         // Restore the node structure by creating panes
-        await this.restoreNode(savedRoot);
+        this.root = await this.restoreNode(savedRoot);
         sendState(this.window, this.root);
     };
 
     private restoreNode = async (node: SerializedNode): Promise<Node> => {
         if (node.kind === "leaf") {
-            const pane = await this.make(node.url);
+            // Create pane with the correct ID from the start
+            const pane = await this.make(node.url, node.id);
+
             // Update saved metadata
             if (node.title) pane.leaf.title = node.title;
             if (node.favicon) pane.leaf.favicon = node.favicon;
@@ -1002,11 +1001,6 @@ export class Window {
             if (node.backgroundColor) pane.leaf.backgroundColor = node.backgroundColor;
             if (node.textColor) pane.leaf.textColor = node.textColor;
             if (node.image) pane.leaf.image = node.image;
-
-            // Set root if this is the first pane
-            if (!this.root) {
-                this.root = pane.leaf;
-            }
 
             return pane.leaf;
         } else {
@@ -1019,11 +1013,6 @@ export class Window {
                 a,
                 b
             };
-
-            // Set root if this is the top-level split
-            if (!this.root) {
-                this.root = split;
-            }
 
             return split;
         }

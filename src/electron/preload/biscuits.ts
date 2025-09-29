@@ -238,9 +238,12 @@ const performSelection = (match: any) => {
     // First deactivate the visual elements
     deactivate();
     
+    // Get pane ID from command line args to send completion message
+    const paneIdArg = process.argv.find(arg => arg.startsWith('--paneId='));
+    const paneId = paneIdArg ? parseInt(paneIdArg.split('=')[1]) : 0;
+    
     // Then notify main process that biscuits are being deactivated
-    // Using sendToHost to ensure it goes to the correct webview
-    ipcRenderer.sendToHost('pane:biscuits:completed');
+    ipcRenderer.send('pane:biscuits:completed', { paneId });
     
     // For links, navigate directly instead of clicking
     // This ensures we always navigate in the same pane

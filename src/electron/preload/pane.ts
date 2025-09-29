@@ -215,7 +215,9 @@ const paneId = paneIdArg ? parseInt(paneIdArg.split('=')[1]) : 0;
 const updateTypingState = () => {
     const isTyping = isTypingContext();
     // Use invoke to send to main process with pane ID
-    ipcRenderer.invoke('pane:typing:update', { paneId, isTyping });
+    ipcRenderer.invoke('pane:typing:update', { paneId, isTyping }).catch(() => {
+        // Ignore errors if handler not ready yet
+    });
 };
 
 // Send initial state when DOM is ready
