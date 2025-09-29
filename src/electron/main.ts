@@ -1,6 +1,19 @@
 import { app, BaseWindow } from "electron";
+import * as path from "path";
 
 import { Window } from "./window";
+
+app.setName("Where");
+app.setAboutPanelOptions({
+  applicationName: "Where",
+  applicationVersion: "0.1.0",
+  copyright: "© 2024 Where Browser",
+  credits: "Navigate the web with purpose"
+});
+
+if (process.platform === 'darwin') {
+  app.dock.setIcon(path.join(__dirname, '..', 'assets', 'icon.png'));
+}
 
 app
   .whenReady()

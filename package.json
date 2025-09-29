@@ -1,32 +1,48 @@
 {
-  "name": "arc-lite",
-  "version": "0.1.0",
-  "main": "dist-electron/main.js",
-  "type": "commonjs",
-  "scripts": {
-    "dev": "concurrently -k -n VITE,TSUP,ELECTRON \"vite\" \"tsup --watch --config tsup.config.ts\" \"wait-on tcp:5173 dist-electron/main.js && ELECTRON_START_URL=1 electron .\"",
-    "build": "tsup --config tsup.config.ts && vite build",
-    "start": "electron ."
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.13",
-    "@types/react": "^19.1.12",
-    "@vitejs/plugin-react": "^4.3.0",
-    "autoprefixer": "^10.4.21",
-    "concurrently": "^9.0.0",
-    "electron": "^31.7.7",
-    "postcss": "^8.5.6",
-    "tailwindcss": "^4.1.13",
-    "tsup": "^8.3.0",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.20",
-    "wait-on": "^7.2.0"
-  },
-  "dependencies": {
-    "clsx": "^2.1.1",
-    "glob": "^11.0.3",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "tailwind-merge": "^3.3.1"
-  }
+    "name": "where-browser",
+    "version": "0.1.0",
+    "description": "Where - Navigate the web with purpose",
+    "author": "chance",
+    "license": "MIT",
+    "main": "dist-electron/main.js",
+    "type": "commonjs",
+    "productName": "Where",
+    "scripts": {
+        "dev": "concurrently -k -n VITE,TSUP,ELECTRON \"vite\" \"tsup --watch --config tsup.config.ts\" \"wait-on tcp:5173 dist-electron/main.js && ELECTRON_START_URL=1 electron .\"",
+        "build": "tsup --config tsup.config.ts && vite build",
+        "start": "electron .",
+        "package": "pnpm build && electron-forge package",
+        "make": "pnpm build && electron-forge make"
+    },
+    "config": {
+        "forge": "./forge.config.js"
+    },
+    "devDependencies": {
+        "@electron-forge/cli": "^7.9.0",
+        "@electron-forge/maker-deb": "^7.9.0",
+        "@electron-forge/maker-rpm": "^7.9.0",
+        "@electron-forge/maker-squirrel": "^7.9.0",
+        "@electron-forge/maker-zip": "^7.9.0",
+        "@electron-forge/plugin-auto-unpack-natives": "^7.9.0",
+        "@electron-forge/plugin-fuses": "^7.9.0",
+        "@tailwindcss/vite": "^4.1.13",
+        "@types/react": "^19.1.12",
+        "@vitejs/plugin-react": "^4.3.0",
+        "autoprefixer": "^10.4.21",
+        "concurrently": "^9.0.0",
+        "electron": "^31.7.7",
+        "postcss": "^8.5.6",
+        "tailwindcss": "^4.1.13",
+        "tsup": "^8.3.0",
+        "typescript": "^5.6.3",
+        "vite": "^5.4.20",
+        "wait-on": "^7.2.0"
+    },
+    "dependencies": {
+        "clsx": "^2.1.1",
+        "glob": "^11.0.3",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+        "tailwind-merge": "^3.3.1"
+    }
 }

@@ -1,4 +1,4 @@
-import { BaseWindow, ipcMain, Menu, WebContentsView } from "electron";
+import { BaseWindow, ipcMain, Menu, WebContentsView, app } from "electron";
 
 import { Leaf, Split, Node, Rect, PaneState, SearchState } from "../pane/types";
 import {
@@ -29,12 +29,20 @@ export class Window {
 
     constructor() {
         Menu.setApplicationMenu(null);
+        
+        const iconPath = process.platform === 'darwin' 
+            ? path.join(app.getAppPath(), 'assets', 'icon.icns')
+            : process.platform === 'win32'
+            ? path.join(app.getAppPath(), 'assets', 'icon.ico')
+            : path.join(app.getAppPath(), 'assets', 'icon.png');
+        
         this.window = new BaseWindow({
             width: 1200,
             height: 800,
             frame: false,
             titleBarStyle: "hidden",
             backgroundColor: "#00000000",
+            icon: iconPath,
         });
         this.window.on("closed", () => {
             this.paneById.forEach((pane) => pane.close());
@@ -50,8 +58,7 @@ export class Window {
     }
 
     init = async () => {
-        const first = await this.create("https://staging.onplug.io");
-        await this.split(first, "vertical", "right", "https://onplug.io");
+        await this.create("https://staging.onplug.io");
 
         ipcMain.handle("panes:create", this.handlePanesCreate);
         ipcMain.handle("panes:list", this.handlePanesList);
