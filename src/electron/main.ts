@@ -1,4 +1,4 @@
-import { app, BaseWindow } from "electron";
+import { app, BaseWindow, globalShortcut } from "electron";
 import * as path from "path";
 
 import { Window } from "./window";
@@ -17,16 +17,29 @@ if (process.platform === 'darwin') {
 
 app
   .whenReady()
-  .then(() => new Window())
+  .then(() => {
+    // Register global shortcuts
+    globalShortcut.register('CommandOrControl+Q', () => {
+      app.quit();
+    });
+    
+    return new Window();
+  })
   .then((win) => win.init())
   .catch(console.error);
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
 app.on("activate", () => {
   if (BaseWindow.getAllWindows().length !== 0) return;
 
   const window = new Window();
   window.init();
+});
+
+app.on('will-quit', () => {
+  // Unregister all shortcuts when quitting
+  globalShortcut.unregisterAll();
 });

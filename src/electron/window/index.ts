@@ -1,6 +1,7 @@
 import { BaseWindow, ipcMain, Menu, WebContentsView, app } from "electron";
 
 import { Leaf, Split, Node, Rect, PaneState, SearchState } from "../pane/types";
+import { savePaneState, loadPaneState, serializeNode, SerializedNode } from "../storage/paneState";
 import {
     sendState,
     replaceChild,
@@ -16,26 +17,29 @@ import { isLikelyUrl, normalizeUrlSmart, buildGoogleSearchUrl } from "../utils/u
 import * as path from "path";
 
 export class Window {
-    paneById = new Map<number, Pane>();
-    lastActivePaneId: number | null = null;
-    searchStates = new Map<number, SearchState>();
-    searchDebounceTimers = new Map<number, NodeJS.Timeout>();
-    overlayStates = new Map<number, boolean>(); // Track which panes have overlay open
-    biscuitStates = new Map<number, { active: boolean; typed: string }>(); // Track biscuit mode per pane
-    typingStates = new Map<number, boolean>(); // Track if user is typing in an input
-
     window: BaseWindow;
     root: Node | null = null;
 
+    paneById = new Map<number, Pane>();
+    lastActivePaneId: number | null = null;
+
+    searchStates = new Map<number, SearchState>();
+    searchDebounceTimers = new Map<number, NodeJS.Timeout>();
+    overlayStates = new Map<number, boolean>();
+    biscuitStates = new Map<number, { active: boolean; typed: string }>();
+    typingStates = new Map<number, boolean>();
+
+    saveDebounceTimer: NodeJS.Timeout | null = null;
+
     constructor() {
         Menu.setApplicationMenu(null);
-        
-        const iconPath = process.platform === 'darwin' 
+
+        const iconPath = process.platform === 'darwin'
             ? path.join(app.getAppPath(), 'assets', 'icon.icns')
             : process.platform === 'win32'
-            ? path.join(app.getAppPath(), 'assets', 'icon.ico')
-            : path.join(app.getAppPath(), 'assets', 'icon.png');
-        
+                ? path.join(app.getAppPath(), 'assets', 'icon.ico')
+                : path.join(app.getAppPath(), 'assets', 'icon.png');
+
         this.window = new BaseWindow({
             width: 1200,
             height: 800,
@@ -44,9 +48,17 @@ export class Window {
             backgroundColor: "#00000000",
             icon: iconPath,
         });
+
         this.window.on("closed", () => {
-            this.paneById.forEach((pane) => pane.close());
-            this.window?.getChildWindows().forEach((child) => child.close());
+            // Clean up without trying to access destroyed views
+            this.paneById.clear();
+            this.searchStates.clear();
+            this.overlayStates.clear();
+            this.biscuitStates.clear();
+            this.typingStates.clear();
+            if (this.saveDebounceTimer) {
+                clearTimeout(this.saveDebounceTimer);
+            }
         });
 
         try {
@@ -54,11 +66,36 @@ export class Window {
                 this.window.setWindowButtonVisibility(false);
         } catch { }
 
-        this.window.on("resize", () => sendState(this.window, this.root));
+        this.window.on("resize", () => {
+            sendState(this.window, this.root);
+            this.debouncedSave();
+        });
+
+        // Save state before window closes, but only if we have panes
+        this.window.on("close", () => {
+            if (this.root) {
+                this.saveState();
+            }
+        });
     }
 
     init = async () => {
-        await this.create("https://staging.onplug.io");
+        // Load saved state or create default
+        const savedState = loadPaneState();
+
+        if (savedState && savedState.root) {
+            // Restore saved pane layout
+            await this.restoreFromSavedState(savedState.root);
+            this.lastActivePaneId = savedState.lastActivePaneId;
+
+            // Restore window bounds if available
+            if (savedState.windowBounds) {
+                this.window.setBounds(savedState.windowBounds);
+            }
+        } else {
+            // First time user - create default pane
+            await this.create("https://staging.onplug.io");
+        }
 
         ipcMain.handle("panes:create", this.handlePanesCreate);
         ipcMain.handle("panes:list", this.handlePanesList);
@@ -87,6 +124,7 @@ export class Window {
             this.lastActivePaneId = pane.id;
 
             sendState(this.window, this.root);
+            this.debouncedSave();
 
             return pane.id;
         }
@@ -188,6 +226,10 @@ export class Window {
         this.focus(other.id);
 
         sendState(this.window, this.root, pane);
+        // Don't save if we just cleared the root
+        if (this.root) {
+            this.debouncedSave();
+        }
         return other.id;
     };
 
@@ -257,6 +299,11 @@ export class Window {
         }
         this.root = replaceNode(this.root, id);
         sendState(this.window, this.root, null);
+        
+        // Only save if we still have panes
+        if (this.root) {
+            this.debouncedSave();
+        }
 
         if (nextActive != null && this.paneById.has(nextActive)) {
             this.lastActivePaneId = nextActive;
@@ -383,6 +430,7 @@ export class Window {
         if (next != null && this.paneById.has(next)) {
             this.lastActivePaneId = next;
             this.focus(next);
+            this.debouncedSave();
         }
     };
 
@@ -393,6 +441,7 @@ export class Window {
     handlePaneActive = (_: unknown, { id }: { id: number }) => {
         if (!this.paneById.has(id)) return;
         this.lastActivePaneId = id;
+        this.debouncedSave();
     };
 
     handlePaneOverlay = (_: unknown, { id }: { id: number }) => {
@@ -450,6 +499,7 @@ export class Window {
     ) => {
         const targetId = this.lastActivePaneId ?? id;
         nudgeSplitSize(this.window, this.root, targetId, dir);
+        this.debouncedSave();
     };
 
     subscribe = (pane: Pane) => {
@@ -913,6 +963,70 @@ export class Window {
                 layer.webContents.send("search:focus", { paneId, isFocused });
             });
         });
+    };
+
+    private saveState = () => {
+        // Only save if we have actual panes
+        if (!this.root) return;
+        
+        const bounds = this.window.getBounds();
+        savePaneState({
+            root: serializeNode(this.root),
+            lastActivePaneId: this.lastActivePaneId,
+            windowBounds: bounds
+        });
+    };
+
+    private debouncedSave = () => {
+        if (this.saveDebounceTimer) {
+            clearTimeout(this.saveDebounceTimer);
+        }
+        this.saveDebounceTimer = setTimeout(() => {
+            this.saveState();
+        }, 1000);
+    };
+
+    private restoreFromSavedState = async (savedRoot: SerializedNode) => {
+        // Restore the node structure by creating panes
+        await this.restoreNode(savedRoot);
+        sendState(this.window, this.root);
+    };
+
+    private restoreNode = async (node: SerializedNode): Promise<Node> => {
+        if (node.kind === "leaf") {
+            const pane = await this.make(node.url);
+            // Update saved metadata
+            if (node.title) pane.leaf.title = node.title;
+            if (node.favicon) pane.leaf.favicon = node.favicon;
+            if (node.description) pane.leaf.description = node.description;
+            if (node.backgroundColor) pane.leaf.backgroundColor = node.backgroundColor;
+            if (node.textColor) pane.leaf.textColor = node.textColor;
+            if (node.image) pane.leaf.image = node.image;
+
+            // Set root if this is the first pane
+            if (!this.root) {
+                this.root = pane.leaf;
+            }
+
+            return pane.leaf;
+        } else {
+            const a = await this.restoreNode(node.a);
+            const b = await this.restoreNode(node.b);
+            const split: Split = {
+                kind: "split",
+                dir: node.dir,
+                size: node.size,
+                a,
+                b
+            };
+
+            // Set root if this is the top-level split
+            if (!this.root) {
+                this.root = split;
+            }
+
+            return split;
+        }
     };
 
 }
