@@ -22,6 +22,7 @@ export class Window {
     searchDebounceTimers = new Map<number, NodeJS.Timeout>();
     overlayStates = new Map<number, boolean>(); // Track which panes have overlay open
     biscuitStates = new Map<number, { active: boolean; typed: string }>(); // Track biscuit mode per pane
+    typingStates = new Map<number, boolean>(); // Track if user is typing in an input
 
     window: BaseWindow;
     root: Node | null = null;
@@ -61,6 +62,7 @@ export class Window {
         ipcMain.handle("search:input", this.handleSearchInput);
         ipcMain.handle("search:submit", this.handleSearchSubmit);
         ipcMain.handle("search:blur", this.handleSearchBlur);
+        ipcMain.handle("pane:typing:update", this.handleTypingUpdate);
 
         ipcMain.on("panes:navigate", this.onPanesNavigate);
         ipcMain.on("pane:biscuits", this.onPaneBiscuits);
@@ -68,7 +70,6 @@ export class Window {
         ipcMain.on("pane:close", this.onPaneClose);
         ipcMain.on("pane:split", this.onPaneSplit);
         ipcMain.on("pane:resize", this.onPaneResize);
-        ipcMain.on("pane:biscuits:completed", this.onBiscuitsCompleted);
     };
 
     create = async (url: string) => {
@@ -114,6 +115,7 @@ export class Window {
         });
         this.overlayStates.set(id, false);
         this.biscuitStates.set(id, { active: false, typed: "" });
+        this.typingStates.set(id, false);
 
         this.subscribe(pane);
         await view.webContents.loadURL(url);
@@ -156,7 +158,7 @@ export class Window {
         const target = child.leaf;
 
         const parent = findParent(this.root, id);
-        const pane = await this.make(url || "https://perplexity.com");
+        const pane = await this.make(url || "https://chat.com");
         const other = pane.leaf;
 
         let node: Split;
@@ -348,7 +350,7 @@ export class Window {
     };
 
     handlePanesCreate = (_: unknown, payload: { url: string; rect: Rect }) =>
-        this.create(payload.url || "https://perplexity.com");
+        this.create(payload.url || "https://chat.com");
 
     handlePanesList = () => {
         const out: PaneState[] = [];
@@ -449,6 +451,21 @@ export class Window {
         for (const view of leaf.layers ?? []) {
             const wc = view.webContents;
 
+            // Handle biscuits completion from webview
+            wc.on('ipc-message', (event, channel) => {
+                if (channel === 'pane:biscuits:completed') {
+                    const biscuitState = this.biscuitStates.get(leaf.id);
+                    if (biscuitState) {
+                        biscuitState.active = false;
+                        biscuitState.typed = "";
+                    }
+                    // Make sure to send deactivate to clean up any remaining state
+                    try {
+                        leaf.view.webContents.send("pane:biscuits:deactivate");
+                    } catch { }
+                }
+            });
+
             const sync = async () => {
                 if (leaf.view.webContents.getURL() !== view.webContents.getURL()) {
                     return;
@@ -479,31 +496,38 @@ export class Window {
                     searchState.query = leaf.url;
                     this.broadcastSearchUpdate(leaf.id, leaf.url);
                 }
-                
+
                 // Broadcast updated pane state to all overlays
                 sendState(this.window, this.root, pane);
             };
 
-            wc.on("did-navigate", sync);
-            wc.on("did-navigate-in-page", sync);
+            const handleNavigation = () => {
+                // Clear biscuit state on navigation
+                const biscuitState = this.biscuitStates.get(leaf.id);
+                if (biscuitState) {
+                    biscuitState.active = false;
+                    biscuitState.typed = "";
+                }
+                // Clear typing state on navigation
+                this.typingStates.set(leaf.id, false);
+                sync();
+            };
+
+
+            wc.on("did-navigate", handleNavigation);
+            wc.on("did-navigate-in-page", handleNavigation);
             wc.on("page-title-updated", sync);
             wc.once("destroyed", () => {
-                wc.removeListener("did-navigate", sync);
-                wc.removeListener("did-navigate-in-page", sync);
+                wc.removeListener("did-navigate", handleNavigation);
+                wc.removeListener("did-navigate-in-page", handleNavigation);
                 wc.removeListener("page-title-updated", sync);
             });
-            
+
             // Intercept all new window attempts and navigate in the same pane
             wc.setWindowOpenHandler((details) => {
                 // Navigate in the current pane instead of opening new window
                 wc.loadURL(details.url);
                 return { action: 'deny' };
-            });
-            
-            // Also handle window.open() calls that might bypass the handler
-            wc.on('new-window', (event, url) => {
-                event.preventDefault();
-                wc.loadURL(url);
             });
 
             wc.on(
@@ -527,118 +551,126 @@ export class Window {
                 const overlay = this.overlayStates.get(leaf.id) || false;
                 const biscuitState = this.biscuitStates.get(leaf.id);
                 const biscuitsActive = biscuitState?.active || false;
+                const isTyping = this.typingStates.get(leaf.id) || false;
 
-                // Handle biscuit mode input
-                if (biscuitsActive && input.key) {
+                // Check if user is typing in an input field
+                const checkTypingContext = () => {
+                    return wc.executeJavaScript(`
+                        (() => {
+                            function deepestActiveElement(root) {
+                                let ae = root.activeElement;
+                                while (ae && ae.shadowRoot && ae.shadowRoot.activeElement) {
+                                    ae = ae.shadowRoot.activeElement;
+                                }
+                                return ae;
+                            }
+                            
+                            const el = deepestActiveElement(document);
+                            if (!el) return false;
+                            
+                            if (el.isContentEditable) return true;
+                            const ce = el.getAttribute?.('contenteditable');
+                            if (ce === '' || ce === 'true') return true;
+                            
+                            const tag = el.tagName?.toLowerCase();
+                            if (tag === 'textarea') return true;
+                            
+                            if (tag === 'input') {
+                                const t = el.type?.toLowerCase();
+                                if (!t) return true;
+                                if (['text', 'search', 'url', 'email', 'password', 'tel', 'number', 'date', 'datetime-local', 'month', 'time', 'week'].includes(t)) return true;
+                            }
+                            
+                            if (el.getAttribute?.('role') === 'textbox') return true;
+                            return false;
+                        })()
+                    `);
+                };
+
+                if (biscuitState !== undefined && biscuitsActive && input.key) {
                     const key = input.key.toLowerCase();
-                    
+
                     // Escape cancels biscuit mode
                     if (key === 'escape') {
+                        event.preventDefault();
                         biscuitState.active = false;
                         biscuitState.typed = "";
-                        view.webContents.send("pane:biscuits:deactivate");
+                        leaf.view.webContents.send("pane:biscuits:deactivate");
                         return;
                     }
-                    
+
                     // Check if it's a valid hint character
-                    const HINT_CHARS = 'asdfghjklqwertuiopzxcvbnm';
+                    const HINT_CHARS = 'asdghjklqwertuiopzxcvbnm'; // 'f' removed since it toggles biscuits
                     if (HINT_CHARS.includes(key) && !input.control && !input.meta && !input.alt) {
+                        event.preventDefault();
                         biscuitState.typed += key;
-                        view.webContents.send("pane:biscuits:update", { typed: biscuitState.typed });
+                        leaf.view.webContents.send("pane:biscuits:update", { typed: biscuitState.typed });
                         return;
                     }
-                    
+
                     // Backspace removes last character
                     if (key === 'backspace' && biscuitState.typed.length > 0) {
+                        event.preventDefault();
                         biscuitState.typed = biscuitState.typed.slice(0, -1);
-                        view.webContents.send("pane:biscuits:update", { typed: biscuitState.typed });
+                        leaf.view.webContents.send("pane:biscuits:update", { typed: biscuitState.typed });
                         return;
                     }
-                    
-                    // Any other key cancels biscuit mode
-                    biscuitState.active = false;
-                    biscuitState.typed = "";
-                    view.webContents.send("pane:biscuits:deactivate");
-                    // Don't return here - let the key fall through to normal handling
+
+                    // For any other alphanumeric key, prevent default to stop page shortcuts
+                    if (key.length === 1 && !input.control && !input.meta && !input.alt) {
+                        event.preventDefault();
+                        // Cancel biscuit mode for non-hint characters
+                        biscuitState.active = false;
+                        biscuitState.typed = "";
+                        leaf.view.webContents.send("pane:biscuits:deactivate");
+                    }
+
+                    return;
                 }
+
+                // Build the keybind string
+                const buildKeybindString = (input: Electron.Input) => {
+                    const modifiers: string[] = [];
+                    if (input.meta) modifiers.push("meta");
+                    if (input.shift) modifiers.push("shift");
+                    if (input.alt) modifiers.push("alt");
+                    if (input.control) modifiers.push("control");
+
+                    const key = input.key?.toLowerCase();
+                    return modifiers.length > 0 ? `${modifiers.join("+")}+${key}` : key;
+                };
+
+                const keybindString = buildKeybindString(input);
 
                 const SCROLL_SIZE = 80;
                 const STEP_SIZE = 4;
 
                 const overlayKeys = {
-                    "escape": () => {
-                        // Unfocus any active element in the page
-                        view.webContents.executeJavaScript(`
-                            (() => {
-                                const activeEl = document.activeElement;
-                                if (activeEl && activeEl !== document.body) {
-                                    activeEl.blur();
-                                }
-                                // Also clear any text selection
-                                window.getSelection().removeAllRanges();
-                            })()
-                        `);
-                    },
-                    "control+v": () => {
+                    "f": () => {
                         const biscuitState = this.biscuitStates.get(leaf.id);
-                        if (biscuitState && !biscuitState.active) {
-                            // Don't activate biscuits if overlay is open
-                            if (!overlay) {
+                        if (biscuitState) {
+                            // Toggle biscuits (but don't activate if overlay is open)
+                            if (biscuitState.active) {
+                                biscuitState.active = false;
+                                biscuitState.typed = "";
+                                leaf.view.webContents.send("pane:biscuits:deactivate");
+                            } else if (!overlay) {
                                 biscuitState.active = true;
                                 biscuitState.typed = "";
-                                view.webContents.send("pane:biscuits:activate");
+                                leaf.view.webContents.send("pane:biscuits:activate");
                             }
                         }
                     },
-                    "g": () => view.webContents.scrollToTop(),
-                    "j": () => view.webContents.send("pane:scroll", { deltaY: SCROLL_SIZE }),
-                    "k": () => view.webContents.send("pane:scroll", { deltaY: -1 * SCROLL_SIZE }),
-                    "shift+g": () => view.webContents.scrollToBottom(),
-                    "shift+d": () => view.webContents.send("pane:scroll", { deltaY: SCROLL_SIZE * STEP_SIZE }),
-                    "shift+u": () => view.webContents.send("pane:scroll", { deltaY: -1 * SCROLL_SIZE * STEP_SIZE }),
+                    "g": () => leaf.view.webContents.send("pane:scrollToTop"),
+                    "j": () => leaf.view.webContents.send("pane:scroll", { deltaY: SCROLL_SIZE }),
+                    "k": () => leaf.view.webContents.send("pane:scroll", { deltaY: -1 * SCROLL_SIZE }),
+                    "shift+g": () => leaf.view.webContents.send("pane:scrollToBottom"),
+                    "shift+d": () => leaf.view.webContents.send("pane:scroll", { deltaY: SCROLL_SIZE * STEP_SIZE }),
+                    "shift+u": () => leaf.view.webContents.send("pane:scroll", { deltaY: -1 * SCROLL_SIZE * STEP_SIZE }),
                     "control+h": () => this.onPanesNavigate(event, { id: leaf.id, dir: "left" }),
                     "control+l": () => this.onPanesNavigate(event, { id: leaf.id, dir: "right" }),
                     "control+k": () => this.onPanesNavigate(event, { id: leaf.id, dir: "up" }),
                     "control+j": () => this.onPanesNavigate(event, { id: leaf.id, dir: "down" }),
-                }
-
-                const paneKeys = {
-                    "meta+l": () => {
-                        event.preventDefault();
-                        // Disable biscuits when opening overlay
-                        if (biscuitsActive) {
-                            biscuitState!.active = false;
-                            biscuitState!.typed = "";
-                            view.webContents.send("pane:biscuits:deactivate");
-                        }
-                        pane.reverse();
-                        this.overlayStates.set(leaf.id, !overlay);
-                    },
-                    "meta+r": () => {
-                        event.preventDefault();
-                        view.webContents.reload();
-                    },
-                    "meta+shift+r": () => {
-                        event.preventDefault();
-                        view.webContents.reloadIgnoringCache();
-                    },
-                    "meta+[": () => {
-                        event.preventDefault();
-                        if (!overlay && view.webContents.canGoBack()) view.webContents.goBack();
-                    },
-                    "meta+]": () => {
-                        event.preventDefault();
-                        if (!overlay && view.webContents.canGoForward()) view.webContents.goForward();
-                    },
-                }
-
-                const appKeys = {
-                    "meta+w": () => {
-                        event.preventDefault();
-                        this.close(leaf.id);
-
-                        if (!this.root) this.window?.close();
-                    },
                     "shift+h": () => {
                         this.onPaneSplit(event, {
                             id: leaf.id,
@@ -667,6 +699,45 @@ export class Window {
                             side: "down",
                         });
                     },
+                }
+
+                const paneKeys = {
+                    "meta+l": () => {
+                        event.preventDefault();
+                        // Disable biscuits when opening overlay
+                        if (biscuitsActive) {
+                            biscuitState!.active = false;
+                            biscuitState!.typed = "";
+                            leaf.view.webContents.send("pane:biscuits:deactivate");
+                        }
+                        pane.reverse();
+                        this.overlayStates.set(leaf.id, !overlay);
+                    },
+                    "meta+r": () => {
+                        event.preventDefault();
+                        leaf.view.webContents.reload();
+                    },
+                    "meta+shift+r": () => {
+                        event.preventDefault();
+                        leaf.view.webContents.reloadIgnoringCache();
+                    },
+                    "meta+[": () => {
+                        event.preventDefault();
+                        if (!overlay && leaf.view.webContents.canGoBack()) leaf.view.webContents.goBack();
+                    },
+                    "meta+]": () => {
+                        event.preventDefault();
+                        if (!overlay && leaf.view.webContents.canGoForward()) leaf.view.webContents.goForward();
+                    },
+                }
+
+                const appKeys = {
+                    "meta+w": () => {
+                        event.preventDefault();
+                        this.close(leaf.id);
+
+                        if (!this.root) this.window?.close();
+                    },
                     "meta+shift+h": () => {
                         this.onPaneResize(event, { id: leaf.id, dir: "left" });
                     },
@@ -681,29 +752,59 @@ export class Window {
                     },
                 }
 
-                const keybinds = {
-                    ...overlay === false ? overlayKeys : {},
+                // Special handling for Escape key
+                if (input.key?.toLowerCase() === 'escape' && !overlay) {
+                    // Only handle escape when typing OR biscuits active
+                    if (biscuitsActive) {
+                        // Already handled in biscuit mode section above
+                        return;
+                    }
+
+                    if (isTyping) {
+                        event.preventDefault();
+                        // Unfocus any active element
+                        leaf.view.webContents.executeJavaScript(`
+                            (() => {
+                                const activeEl = document.activeElement;
+                                if (activeEl && activeEl !== document.body) {
+                                    activeEl.blur();
+                                }
+                                window.getSelection().removeAllRanges();
+                            })()
+                        `);
+                    }
+                    // If not typing, let escape through for website use
+                    return;
+                }
+
+                // Check all available keybinds first
+                const allKeybinds = {
+                    ...(overlay === false && !biscuitsActive) ? overlayKeys : {},
                     ...paneKeys,
                     ...appKeys,
                 };
 
-                const buildKeybindString = (input: Electron.Input) => {
-                    const modifiers: string[] = [];
-                    if (input.meta) modifiers.push("meta");
-                    if (input.shift) modifiers.push("shift");
-                    if (input.alt) modifiers.push("alt");
-                    if (input.control) modifiers.push("control");
-
-                    const key = input.key?.toLowerCase();
-                    return modifiers.length > 0 ? `${modifiers.join("+")}+${key}` : key;
-                };
-
-                const keybindString = buildKeybindString(input);
-                const keybind = keybinds[keybindString];
+                // If we have a keybind for this key combo, check if we need to verify typing context
+                const keybind = allKeybinds[keybindString];
                 if (keybind) {
-                    event.preventDefault();
-                    keybind();
-                    sendState(this.window, this.root, pane);
+                    // For modifier-less keys, check typing context
+                    const isTypingKey = !input.meta && !input.control && !input.alt;
+
+                    if (isTypingKey && !overlay && !biscuitsActive) {
+                        // For single keys, check if user is typing
+                        if (!isTyping) {
+                            event.preventDefault();
+                            keybind();
+                            sendState(this.window, this.root, pane);
+                        }
+                        // If typing, let the key through to the page
+                    } else {
+                        // Keys with modifiers can be handled immediately
+                        event.preventDefault();
+                        keybind();
+                        sendState(this.window, this.root, pane);
+                    }
+                    return;
                 }
 
                 return;
@@ -749,9 +850,10 @@ export class Window {
 
         const pane = this.paneById.get(paneId);
         if (pane) {
-            pane.leaf.view.webContents.loadURL(url);
+            // Use JavaScript navigation to preserve history
+            pane.leaf.view.webContents.executeJavaScript(`window.location.assign('${url.replace(/'/g, "\\'")}')`);
             this.broadcastSearchUpdate(paneId, url);
-            
+
             // Close the overlay after navigation
             pane.reverse();
             this.overlayStates.set(paneId, false);
@@ -772,6 +874,10 @@ export class Window {
         }
     };
 
+    handleTypingUpdate = async (_: Electron.IpcMainInvokeEvent, { paneId, isTyping }: { paneId: number; isTyping: boolean }) => {
+        this.typingStates.set(paneId, isTyping);
+    };
+
     private processSearchDebounced = (paneId: number, query: string) => {
         const trimmedQuery = query.trim();
         if (!trimmedQuery || /\s/.test(trimmedQuery)) return;
@@ -780,7 +886,8 @@ export class Window {
             const url = normalizeUrlSmart(trimmedQuery);
             const pane = this.paneById.get(paneId);
             if (pane) {
-                pane.leaf.view.webContents.loadURL(url);
+                // Use JavaScript navigation to preserve history
+                pane.leaf.view.webContents.executeJavaScript(`window.location.assign('${url.replace(/'/g, "\\'")}')`);
             }
         }
     };
@@ -801,21 +908,4 @@ export class Window {
         });
     };
 
-    onBiscuitsCompleted = (_: Electron.IpcMainEvent, data: any) => {
-        // Find the pane ID from the webContents that sent this event
-        let paneId: number | null = null;
-        this.paneById.forEach((pane, id) => {
-            if (pane.leaf.view.webContents === _.sender) {
-                paneId = id;
-            }
-        });
-        
-        if (paneId !== null) {
-            const biscuitState = this.biscuitStates.get(paneId);
-            if (biscuitState) {
-                biscuitState.active = false;
-                biscuitState.typed = "";
-            }
-        }
-    };
 }
