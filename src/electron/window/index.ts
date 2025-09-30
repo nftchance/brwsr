@@ -14,13 +14,17 @@ import { Pane } from "../pane/pane";
 import { allocId, contentSize, error } from "../pane/utils";
 import { isLikelyUrl, normalizeUrlSmart, buildGoogleSearchUrl } from "../utils/url";
 import { setupAutoUpdater, checkForUpdates } from "../updater";
+import { WorkspaceManager } from "../workspace/manager";
 
 import * as path from "path";
 
 export class Window {
     window: BaseWindow;
     root: Node | null = null;
+    workspaceManager: WorkspaceManager;
+    activeNodeId: string | null = null;
 
+    panesById = new Map<string, Pane>();
     paneById = new Map<number, Pane>();
     lastActivePaneId: number | null = null;
 
@@ -75,6 +79,11 @@ export class Window {
         // Save state before window closes, but only if we have panes
         this.window.on("close", () => {
             if (this.root) {
+                // Clear any pending saves and save immediately
+                if (this.saveDebounceTimer) {
+                    clearTimeout(this.saveDebounceTimer);
+                    this.saveDebounceTimer = null;
+                }
                 this.saveState();
             }
         });
@@ -101,13 +110,26 @@ export class Window {
         ipcMain.on("pane:resize", this.onPaneResize);
         ipcMain.on("pane:biscuits:completed", this.onBiscuitsCompleted);
 
+        // Register workspace handlers first (before creating workspace manager)
+        ipcMain.handle("workspace:list", this.handleWorkspaceList);
+        ipcMain.handle("workspace:switch", this.handleWorkspaceSwitch);
+        ipcMain.handle("workspace:create", this.handleWorkspaceCreate);
+
         // Set up auto-updater
         setupAutoUpdater(this.window);
-        // Check for updates 30 seconds after startup
-        setTimeout(() => checkForUpdates(), 30000);
+        // Check for updates 30 seconds after startup (disabled in dev)
+        // setTimeout(() => checkForUpdates(), 30000);
 
         // Load saved state or create default
         const savedState = loadPaneState();
+        
+        // Initialize workspace manager first
+        this.workspaceManager = new WorkspaceManager(this);
+        
+        // Load workspace state if available
+        if (savedState?.workspaceState) {
+            this.workspaceManager.loadState(savedState.workspaceState);
+        }
 
         if (savedState && savedState.root) {
             // Restore saved pane layout
@@ -129,6 +151,9 @@ export class Window {
             // First time user - create default pane
             await this.create("https://staging.onplug.io");
         }
+        
+        // Initialize default workspace (will use loaded state if available)
+        this.workspaceManager.initializeDefaultWorkspace();
     };
 
     create = async (url: string) => {
@@ -307,9 +332,34 @@ export class Window {
         }
 
         if (this.root.kind === "leaf" && (this.root as any).id === id) {
-            this.root = null;
-            sendState(this.window, this.root, null);
-            this.window.close();
+            // Last pane in workspace is being closed
+            const currentWorkspace = this.workspaceManager?.getActiveWorkspace();
+            if (currentWorkspace && this.workspaceManager) {
+                const allWorkspaces = this.workspaceManager.getWorkspaces();
+                
+                // If this is the only workspace, close the window
+                if (allWorkspaces.length <= 1) {
+                    this.root = null;
+                    sendState(this.window, this.root, null);
+                    this.window.close();
+                    return;
+                }
+                
+                // Remove the current workspace and switch to another
+                this.workspaceManager.removeWorkspace(currentWorkspace.id);
+                
+                // Find another workspace to switch to
+                const remainingWorkspaces = this.workspaceManager.getWorkspaces();
+                if (remainingWorkspaces.length > 0) {
+                    // Switch to the first available workspace
+                    this.workspaceManager.switchToWorkspace(remainingWorkspaces[0].id);
+                }
+            } else {
+                // No workspace manager, close the window
+                this.root = null;
+                sendState(this.window, this.root, null);
+                this.window.close();
+            }
             return;
         }
         this.root = replaceNode(this.root, id);
@@ -538,32 +588,71 @@ export class Window {
     subscribe = (pane: Pane) => {
         const leaf = pane.leaf;
 
+        // Only listen to navigation events on the main view, not the overlay
+        const mainView = leaf.view;
+        const mainWc = mainView.webContents;
+        
+        // But we still need to setup the overlay communication
         for (const view of leaf.layers ?? []) {
             const wc = view.webContents;
 
             const sync = async () => {
-                if (leaf.view.webContents.getURL() !== view.webContents.getURL()) {
-                    return;
-                }
-
-                const current = wc.getURL();
+                console.log(`[SYNC] Starting sync for pane ${leaf.id}`);
+                // Always use the main view's URL and metadata, not the overlay's
+                const mainWc = leaf.view.webContents;
+                
+                const current = mainWc.getURL();
+                console.log(`[SYNC] Current URL: ${current}, Previous URL: ${leaf.url}`);
+                
+                const urlChanged = current !== leaf.url && !current.startsWith("data:");
+                
                 if (!current.startsWith("data:")) {
                     leaf.url = current || leaf.url;
                 }
-                leaf.title = wc.getTitle();
+                leaf.title = mainWc.getTitle();
                 leaf.html = await pane.html();
 
-                const backgroundColor = await pane.backgroundColor();
-                const textColor = await pane.textColor();
-                const description = await pane.description();
-                const favicon = await pane.favicon();
-                const image = await pane.image();
-
-                leaf.backgroundColor = backgroundColor;
-                leaf.textColor = textColor;
-                leaf.description = description;
-                leaf.favicon = favicon;
-                leaf.image = image;
+                // For SPAs that don't update meta tags, fetch fresh metadata if URL changed
+                if (urlChanged && current.startsWith("http")) {
+                    console.log(`[SYNC] URL changed, fetching fresh metadata from ${current}`);
+                    try {
+                        const response = await fetch(current);
+                        const html = await response.text();
+                        
+                        // Parse the HTML to extract og:image
+                        const imageMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i) ||
+                                          html.match(/<meta\s+content=["']([^"']+)["']\s+property=["']og:image["']/i);
+                        if (imageMatch) {
+                            leaf.image = imageMatch[1];
+                            console.log(`[SYNC] Extracted image from fetched HTML: ${leaf.image}`);
+                        }
+                        
+                        // Also get description
+                        const descMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i) ||
+                                         html.match(/<meta\s+content=["']([^"']+)["']\s+property=["']og:description["']/i);
+                        if (descMatch) {
+                            leaf.description = descMatch[1];
+                        }
+                    } catch (error) {
+                        console.error(`[SYNC] Failed to fetch metadata:`, error);
+                        // Fall back to DOM extraction
+                        const image = await pane.image();
+                        const description = await pane.description();
+                        leaf.image = image;
+                        leaf.description = description;
+                    }
+                    
+                    // Also update visual properties on URL change
+                    const backgroundColor = await pane.backgroundColor();
+                    const textColor = await pane.textColor();
+                    const favicon = await pane.favicon();
+                    
+                    leaf.backgroundColor = backgroundColor;
+                    leaf.textColor = textColor;
+                    leaf.favicon = favicon;
+                    
+                    console.log(`[SYNC] Pane ${leaf.id} - Title: ${leaf.title}, Image: ${leaf.image}`);
+                }
 
                 // Update search state with current URL
                 const searchState = this.searchStates.get(leaf.id);
@@ -572,11 +661,30 @@ export class Window {
                     this.broadcastSearchUpdate(leaf.id, leaf.url);
                 }
 
-                // Broadcast updated pane state to all overlays
-                sendState(this.window, this.root, pane);
+                // Broadcast updated pane state to ALL overlays, not just this pane's
+                console.log(`[SYNC] Broadcasting state for pane ${leaf.id}`);
+                const out: PaneState[] = [];
+                if (this.root) {
+                    const { w, h } = contentSize(this.window);
+                    layout(this.window, this.root, { x: 0, y: 0, width: w, height: h }, out);
+                }
+                console.log(`[SYNC] Sending update to ${this.paneById.size} panes with data:`, out.map(p => ({ id: p.id, url: p.url, image: p.image })));
+                
+                // Send to all pane overlays
+                let overlayCount = 0;
+                this.paneById.forEach(p => {
+                    for (const layer of p.leaf.layers ?? []) {
+                        if (!layer.webContents.isDestroyed()) {
+                            layer.webContents.send("panes:update", out);
+                            overlayCount++;
+                        }
+                    }
+                });
+                console.log(`[SYNC] Sent updates to ${overlayCount} overlay layers`);
             };
 
             const handleNavigation = () => {
+                console.log(`[NAV] Navigation detected for pane ${leaf.id}`);
                 // Clear biscuit state on navigation
                 const biscuitState = this.biscuitStates.get(leaf.id);
                 if (biscuitState) {
@@ -586,17 +694,43 @@ export class Window {
                 // Clear typing state on navigation
                 this.typingStates.set(leaf.id, false);
                 sync();
+                
+                // Save state after navigation
+                this.debouncedSave();
+                
+                // Update workspace preview after navigation
+                if (this.workspaceManager) {
+                    this.workspaceManager.updateActiveWorkspacePreview(2000);
+                }
             };
 
 
-            wc.on("did-navigate", handleNavigation);
-            wc.on("did-navigate-in-page", handleNavigation);
-            wc.on("page-title-updated", sync);
-            wc.once("destroyed", () => {
-                wc.removeListener("did-navigate", handleNavigation);
-                wc.removeListener("did-navigate-in-page", handleNavigation);
-                wc.removeListener("page-title-updated", sync);
-            });
+            // Only register navigation listeners for the main view
+            if (view === mainView) {
+                const handleTitleUpdate = () => {
+                    console.log(`[TITLE] Title updated for pane ${leaf.id}`);
+                    sync();
+                    this.debouncedSave();
+                };
+                
+                const handleDomReady = () => {
+                    sync();
+                };
+                
+                wc.on("did-navigate", handleNavigation);
+                wc.on("did-navigate-in-page", handleNavigation);
+                wc.on("did-frame-navigate", handleNavigation);
+                wc.on("page-title-updated", handleTitleUpdate);
+                wc.on("dom-ready", handleDomReady);
+                
+                wc.once("destroyed", () => {
+                    wc.removeListener("did-navigate", handleNavigation);
+                    wc.removeListener("did-navigate-in-page", handleNavigation);
+                    wc.removeListener("did-frame-navigate", handleNavigation);
+                    wc.removeListener("page-title-updated", handleTitleUpdate);
+                    wc.removeListener("dom-ready", handleDomReady);
+                });
+            }
 
             // Intercept all new window attempts and navigate in the same pane
             wc.setWindowOpenHandler((details) => {
@@ -783,8 +917,65 @@ export class Window {
                             biscuitState!.typed = "";
                             leaf.view.webContents.send("pane:biscuits:deactivate");
                         }
+                        const wasOverlayOpen = overlay;
+                        
+                        // If opening overlay, sync state first to ensure latest data
+                        if (!wasOverlayOpen) {
+                            console.log(`[CMD+L] Opening overlay, syncing state first`);
+                            sync();
+                        }
+                        
                         pane.reverse();
                         this.overlayStates.set(leaf.id, !overlay);
+                        
+                        // Broadcast search focus state
+                        this.broadcastSearchFocus(leaf.id, !wasOverlayOpen);
+                        
+                        // Capture preview when closing overlay
+                        if (wasOverlayOpen && this.workspaceManager) {
+                            const activeWorkspace = this.workspaceManager.getActiveWorkspace();
+                            if (activeWorkspace) {
+                                setTimeout(() => {
+                                    this.workspaceManager.captureWorkspacePreview(activeWorkspace.id);
+                                }, 100);
+                            }
+                        }
+                    },
+                    "meta+1": () => {
+                        event.preventDefault();
+                        this.workspaceManager.switchToWorkspaceByIndex(0);
+                    },
+                    "meta+2": () => {
+                        event.preventDefault();
+                        this.workspaceManager.switchToWorkspaceByIndex(1);
+                    },
+                    "meta+3": () => {
+                        event.preventDefault();
+                        this.workspaceManager.switchToWorkspaceByIndex(2);
+                    },
+                    "meta+4": () => {
+                        event.preventDefault();
+                        this.workspaceManager.switchToWorkspaceByIndex(3);
+                    },
+                    "meta+5": () => {
+                        event.preventDefault();
+                        this.workspaceManager.switchToWorkspaceByIndex(4);
+                    },
+                    "meta+6": () => {
+                        event.preventDefault();
+                        this.workspaceManager.switchToWorkspaceByIndex(5);
+                    },
+                    "meta+7": () => {
+                        event.preventDefault();
+                        this.workspaceManager.switchToWorkspaceByIndex(6);
+                    },
+                    "meta+8": () => {
+                        event.preventDefault();
+                        this.workspaceManager.switchToWorkspaceByIndex(7);
+                    },
+                    "meta+9": () => {
+                        event.preventDefault();
+                        this.workspaceManager.switchToWorkspaceByIndex(8);
                     },
                     "meta+r": () => {
                         event.preventDefault();
@@ -976,11 +1167,12 @@ export class Window {
         savePaneState({
             root: serializeNode(this.root),
             lastActivePaneId: this.lastActivePaneId,
-            windowBounds: bounds
+            windowBounds: bounds,
+            workspaceState: this.workspaceManager ? this.workspaceManager.getState() : undefined
         });
     };
 
-    private debouncedSave = () => {
+    debouncedSave = () => {
         if (this.saveDebounceTimer) {
             clearTimeout(this.saveDebounceTimer);
         }
@@ -994,8 +1186,47 @@ export class Window {
         this.root = await this.restoreNode(savedRoot);
         sendState(this.window, this.root);
     };
+    
+    // Workspace handlers
+    handleWorkspaceList = async () => {
+        if (!this.workspaceManager) {
+            return [];
+        }
+        return this.workspaceManager.getWorkspaces().map(workspace => ({
+            id: workspace.id,
+            name: workspace.name,
+            index: workspace.index,
+            preview: workspace.preview,
+            lastAccessed: workspace.lastAccessed,
+            isActive: workspace.isActive,
+        }));
+    };
+    
+    handleWorkspaceSwitch = async (_: unknown, { workspaceId }: { workspaceId: string }) => {
+        if (!this.workspaceManager) {
+            return false;
+        }
+        return this.workspaceManager.switchToWorkspace(workspaceId);
+    };
+    
+    handleWorkspaceCreate = async (_: unknown, { index }: { index?: number }) => {
+        if (!this.workspaceManager) {
+            return null;
+        }
+        const workspace = await this.workspaceManager.createWorkspace(index);
+        if (!workspace) return null;
+        
+        return {
+            id: workspace.id,
+            name: workspace.name,
+            index: workspace.index,
+            preview: workspace.preview,
+            lastAccessed: workspace.lastAccessed,
+            isActive: workspace.isActive,
+        };
+    };
 
-    private restoreNode = async (node: SerializedNode): Promise<Node> => {
+    restoreNode = async (node: SerializedNode): Promise<Node> => {
         if (node.kind === "leaf") {
             // Create pane with the correct ID from the start
             const pane = await this.make(node.url, node.id);

@@ -62,6 +62,8 @@ export class Pane {
 
     reverse = () => {
         const layers = this.leaf.layers ?? [];
+        const overlayWasFirst = layers[0] === (this.leaf.layers ?? [])[0];
+        
         layers.reverse();
         for (const layer of layers) {
             this.window.contentView.addChildView(layer);
@@ -70,9 +72,16 @@ export class Pane {
         this.leaf.layers = layers;
 
         layers[1].webContents.focus();
-        layers[1].webContents.send(
+        
+        // Send focus event to overlay
+        // After reverse: if overlay was first (index 0), it's now last (index 1) = visible
+        const isOverlayVisible = overlayWasFirst;
+        
+        // Always send to the overlay (which was originally at index 0)
+        const overlayView = overlayWasFirst ? layers[1] : layers[0];
+        overlayView.webContents.send(
             "pane:overlay:focus",
-            true
+            isOverlayVisible
         );
     };
 
@@ -231,14 +240,27 @@ export class Pane {
             'meta[property="image"]'
           ];
           
+          let imageUrl = '';
+          
           for (const selector of selectors) {
             const meta = document.querySelector(selector);
             if (meta && meta.content) {
-              return meta.content;
+              imageUrl = meta.content;
+              break;
             }
           }
           
-          return '';
+          // Fix relative URLs if needed
+          if (imageUrl) {
+            if (imageUrl.startsWith('//')) {
+              imageUrl = window.location.protocol + imageUrl;
+            } else if (imageUrl.startsWith('/')) {
+              imageUrl = window.location.origin + imageUrl;
+            }
+          }
+          
+          console.log('[PANE] Extracted image URL:', imageUrl, 'from', window.location.href);
+          return imageUrl;
         })()
     `);
     };

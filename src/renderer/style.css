@@ -26,3 +26,25 @@ body,
 .search-container {
   transition: background-color 0.3s ease, color 0.3s ease;
 }
+
+/* Animated noise texture - subtle shimmer */
+@keyframes noiseShift1 {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(-2px, 1px); }
+  50% { transform: translate(1px, -2px); }
+  75% { transform: translate(-1px, -1px); }
+}
+
+@keyframes noiseShift2 {
+  0%, 100% { transform: translate(0, 0); }
+  33% { transform: translate(2px, -1px); }
+  66% { transform: translate(-1px, 2px); }
+}
+
+.animate-noise-1 {
+  animation: noiseShift1 4s ease-in-out infinite;
+}
+
+.animate-noise-2 {
+  animation: noiseShift2 6s ease-in-out infinite;
+}

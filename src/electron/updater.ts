@@ -1,12 +1,13 @@
 import { autoUpdater } from 'electron-updater'
 import { app, dialog, BrowserWindow } from 'electron'
 
-const isDev = !!process.env.ELECTRON_START_URL
+const isDev = !app.isPackaged || !!process.env.ELECTRON_START_URL
 
 export function setupAutoUpdater(mainWindow: BrowserWindow) {
+  // Skip auto-updater setup entirely in development
   if (isDev) {
-    autoUpdater.updateConfigPath = 'dev-app-update.yml'
-    autoUpdater.forceDevUpdateConfig = true
+    console.log('Auto-updater disabled in development mode')
+    return
   }
 
   autoUpdater.autoDownload = false
@@ -64,5 +65,17 @@ export function setupAutoUpdater(mainWindow: BrowserWindow) {
 }
 
 export function checkForUpdates() {
-  autoUpdater.checkForUpdatesAndNotify()
+  // Skip update checks in development
+  if (isDev) {
+    console.log('Skipping update check in development mode')
+    return
+  }
+  
+  try {
+    autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+      console.log('Update check failed:', error.message)
+    })
+  } catch (error) {
+    console.log('Update check error:', error)
+  }
 }

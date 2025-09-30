@@ -2,6 +2,7 @@ import { app } from "electron";
 import * as fs from "fs";
 import * as path from "path";
 import { Node } from "../pane/types";
+import { WorkspaceState } from "../workspace/types";
 
 const PANE_STATE_FILE = "pane-state.json";
 
@@ -14,6 +15,7 @@ export interface SavedPaneState {
     x?: number;
     y?: number;
   };
+  workspaceState?: WorkspaceState;
 }
 
 export interface SerializedLeaf {
@@ -62,7 +64,26 @@ export function loadPaneState(): SavedPaneState | null {
     }
     
     const data = fs.readFileSync(filePath, "utf-8");
-    return JSON.parse(data);
+    
+    // Check if file is empty or contains only whitespace
+    if (!data || data.trim().length === 0) {
+      console.warn("Pane state file is empty, returning null");
+      return null;
+    }
+    
+    try {
+      return JSON.parse(data);
+    } catch (parseError) {
+      console.error("Failed to parse pane state JSON:", parseError);
+      console.error("Invalid JSON content:", data.substring(0, 100) + "...");
+      
+      // Optionally rename the corrupted file for debugging
+      const backupPath = filePath + ".corrupted-" + Date.now();
+      fs.renameSync(filePath, backupPath);
+      console.log(`Corrupted pane state file moved to: ${backupPath}`);
+      
+      return null;
+    }
   } catch (error) {
     console.error("Failed to load pane state:", error);
     return null;

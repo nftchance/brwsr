@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from "electron";
 
 import { PaneState, Rect, Leaf } from "./pane/types";
+import { SerializedWorkspace } from "./workspace/types";
 
 const arg = process.argv.find((a) => a.startsWith("--paneId="));
 const paneId = arg ? Number(arg.split("=")[1]) : -1;
@@ -36,6 +37,14 @@ export const invoke = {
         ipcRenderer.invoke("search:submit", { paneId, query }) as Promise<void>,
     searchBlur: (paneId: number) =>
         ipcRenderer.invoke("search:blur", { paneId }) as Promise<void>,
+        
+    // Workspace methods
+    listWorkspaces: () => 
+        ipcRenderer.invoke("workspace:list") as Promise<SerializedWorkspace[]>,
+    switchWorkspace: (workspaceId: string) =>
+        ipcRenderer.invoke("workspace:switch", { workspaceId }) as Promise<boolean>,
+    createWorkspace: (index?: number) =>
+        ipcRenderer.invoke("workspace:create", { index }) as Promise<SerializedWorkspace | null>,
 
     onPanes: (cb: (state: PaneState[]) => void) => {
         const handler = (_e: IpcRendererEvent, state: PaneState[]) => cb(state);
@@ -61,6 +70,11 @@ export const invoke = {
         const handler = (_e: IpcRendererEvent, data: { paneId: number; isFocused: boolean }) => cb(data);
         ipcRenderer.on("search:focus", handler);
         return () => ipcRenderer.removeListener("search:focus", handler);
+    },
+    onWorkspaceUpdate: (cb: (workspaces: SerializedWorkspace[]) => void) => {
+        const handler = (_e: IpcRendererEvent, workspaces: SerializedWorkspace[]) => cb(workspaces);
+        ipcRenderer.on("workspace:update", handler);
+        return () => ipcRenderer.removeListener("workspace:update", handler);
     },
 };
 

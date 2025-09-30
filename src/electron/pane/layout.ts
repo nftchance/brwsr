@@ -31,7 +31,7 @@ export function layout(
 ) {
   if (node.kind === "leaf") {
     setLeafBounds(win, node, rect);
-    out.push({
+    const paneState = {
       id: node.id,
       url: node.url,
       title: node.title ?? "",
@@ -41,7 +41,9 @@ export function layout(
       textColor: node.textColor ?? "",
       description: node.description ?? "",
       image: node.image ?? "",
-    });
+    };
+    console.log(`[LAYOUT] Creating PaneState for pane ${node.id} - Image: ${paneState.image}`);
+    out.push(paneState);
     return;
   }
   const { dir, size, a, b } = node;
