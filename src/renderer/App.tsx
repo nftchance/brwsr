@@ -7,6 +7,7 @@ import React, {
     useMemo,
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { Volume2, VolumeOff } from "lucide-react";
 
 import { PaneState } from "../electron/pane/types";
 import { SerializedWorkspace } from "../electron/workspace/types";
@@ -208,6 +209,7 @@ export default function App() {
             <motion.div
                 key={`overlay-content-${animationKey}`}
                 className="w-full h-full flex items-center justify-center relative"
+                transition={{ duration: 0.1 }}
             >
                 <div
                     className="absolute inset-0 pointer-events-none opacity-5 mix-blend-overlay"
@@ -248,6 +250,7 @@ export default function App() {
                         style={{
                             ...overlayStyles
                         }}
+                        transition={{ duration: 0.1 }}
                     >
                         {currentPane?.favicon && !faviconError && (
                             <img
@@ -372,6 +375,7 @@ export default function App() {
                             className="flex flex-row items-center gap-4 px-4 mb-4"
                             initial={{ opacity: 0, y: 20 }}
                             animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.1 }}
                         >
                             {workspaces.map((workspace) => (
                                 <motion.button
@@ -384,7 +388,7 @@ export default function App() {
                                     initial={{ opacity: 0, translateY: "50%" }}
                                     animate={{ opacity: 1, translateY: "0%" }}
                                     transition={{
-                                        delay: workspace.index * 0.1,
+                                        delay: workspace.index * 0.05,
                                         duration: 0.1,
                                     }}
                                 >
@@ -412,8 +416,27 @@ export default function App() {
                                             <span className="text-xs text-white/50">{workspace.index + 1}</span>
                                         </div>
                                     )}
-                                    <div className="absolute top-1 left-1 bg-black/70 px-1.5 py-0.5 rounded text-xs text-white font-mono">
-                                        {workspace.index + 1}
+
+                                    <div className="flex flex-row items-center gap-2 absolute -top-6 left-0 right-0 z-[10] justify-between">
+                                        <p className="h-5 z-[10] text-xs items-center flex justify-center p-1 rounded-sm border-[1px] bg-white/10" style={{ 
+                                            ...overlayStyles, 
+                                            borderColor: accentColor 
+                                        }}>
+                                            {workspace.index + 1}
+                                        </p>
+
+                                        {(workspace.isMuted || workspace.isAudible) && (
+                                            <p className="z-[10] items-center flex justify-center p-1 h-5 rounded-sm border-[1px]" style={{ 
+                                                ...overlayStyles, 
+                                                borderColor: accentColor 
+                                            }}>
+                                                {workspace.isMuted ? (
+                                                    <VolumeOff className="w-3 h-3" />
+                                                ) : (
+                                                    <Volume2 className="w-3 h-3" />
+                                                )}
+                                            </p>
+                                        )}
                                     </div>
                                 </motion.button>
                             ))}

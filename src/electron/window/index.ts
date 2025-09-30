@@ -872,6 +872,7 @@ export class Window {
                     "g": () => leaf.view.webContents.send("pane:scrollToTop"),
                     "j": () => leaf.view.webContents.send("pane:scroll", { deltaY: SCROLL_SIZE }),
                     "k": () => leaf.view.webContents.send("pane:scroll", { deltaY: -1 * SCROLL_SIZE }),
+                    "m": () => this.workspaceManager?.toggleMute(),
                     "shift+g": () => leaf.view.webContents.send("pane:scrollToBottom"),
                     "shift+d": () => leaf.view.webContents.send("pane:scroll", { deltaY: SCROLL_SIZE * STEP_SIZE }),
                     "shift+u": () => leaf.view.webContents.send("pane:scroll", { deltaY: -1 * SCROLL_SIZE * STEP_SIZE }),

@@ -27,4 +27,6 @@ export interface SerializedWorkspace {
     preview?: string;
     lastAccessed: number;
     isActive: boolean;
+    isMuted?: boolean; // Computed from webContents state
+    isAudible?: boolean; // Whether any pane is currently producing audio
 }

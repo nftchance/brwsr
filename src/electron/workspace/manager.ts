@@ -33,6 +33,9 @@ export class WorkspaceManager {
                     this.captureWorkspacePreview(activeWorkspace.id);
                 }
             }
+            
+            // Always check audible state for all workspaces and broadcast if changed
+            this.broadcastWorkspaceUpdate();
         }, 1000); // 1 second
     }
     
@@ -170,8 +173,13 @@ export class WorkspaceManager {
         if (!targetWorkspace) return false;
 
         const currentWorkspace = this.getActiveWorkspace();
+        let currentWorkspaceMuted = false;
+        
         if (currentWorkspace && currentWorkspace.id !== workspaceId) {
             await this.captureWorkspacePreview(currentWorkspace.id);
+            
+            // Save current mute state before hiding
+            currentWorkspaceMuted = this.isWorkspaceMuted(currentWorkspace);
             
             // Save current workspace state
             currentWorkspace.isActive = false;
@@ -191,6 +199,12 @@ export class WorkspaceManager {
             // Need to restore from serialized state
             targetWorkspace.root = await this.window.restoreNode(targetWorkspace.serializedRoot);
             targetWorkspace.serializedRoot = null;
+            
+            // Apply the saved mute state from the current workspace to newly created panes
+            // This ensures consistent mute behavior across workspaces
+            if (currentWorkspaceMuted) {
+                this.setWorkspaceMuted(targetWorkspace, true);
+            }
         }
         
         // Make sure we have a valid root
@@ -336,6 +350,59 @@ export class WorkspaceManager {
         sendState(this.window.window, workspace.root);
     }
 
+    toggleMute(): void {
+        const activeWorkspace = this.getActiveWorkspace();
+        if (!activeWorkspace || !activeWorkspace.root) return;
+        
+        // Check current mute state from first pane
+        const isMuted = this.isWorkspaceMuted(activeWorkspace);
+        
+        // Toggle mute on all panes in workspace
+        this.setWorkspaceMuted(activeWorkspace, !isMuted);
+        
+        // Broadcast the update
+        this.broadcastWorkspaceUpdate();
+    }
+    
+    private isWorkspaceMuted(workspace: Workspace): boolean {
+        if (!workspace.root) return false;
+        
+        // Check if any pane is muted (they should all have same state)
+        let isMuted = false;
+        this.forEachLeaf(workspace.root, (leaf) => {
+            if (leaf.view?.webContents && !leaf.view.webContents.isDestroyed()) {
+                isMuted = leaf.view.webContents.isAudioMuted();
+            }
+        });
+        
+        return isMuted;
+    }
+    
+    private setWorkspaceMuted(workspace: Workspace, muted: boolean): void {
+        if (!workspace.root) return;
+        
+        this.forEachLeaf(workspace.root, (leaf) => {
+            if (leaf.view?.webContents && !leaf.view.webContents.isDestroyed()) {
+                leaf.view.webContents.setAudioMuted(muted);
+            }
+        });
+    }
+    
+    private isWorkspaceAudible(workspace: Workspace): boolean {
+        if (!workspace.root) return false;
+        
+        let isAudible = false;
+        this.forEachLeaf(workspace.root, (leaf) => {
+            if (leaf.view?.webContents && !leaf.view.webContents.isDestroyed()) {
+                if (leaf.view.webContents.isCurrentlyAudible()) {
+                    isAudible = true;
+                }
+            }
+        });
+        
+        return isAudible;
+    }
+
     async captureWorkspacePreview(workspaceId: string): Promise<void> {
         const workspace = this.workspaces.get(workspaceId);
         if (!workspace) return;
@@ -383,6 +450,8 @@ export class WorkspaceManager {
             preview: workspace.preview,
             lastAccessed: workspace.lastAccessed,
             isActive: workspace.isActive,
+            isMuted: this.isWorkspaceMuted(workspace),
+            isAudible: this.isWorkspaceAudible(workspace),
         }));
         
         this.window.paneById.forEach(pane => {
